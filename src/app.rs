@@ -185,6 +185,9 @@ pub struct App {
     /// True after `a` until a rule rises to a new, higher level.
     pub acknowledged: bool,
     pub should_quit: bool,
+    /// Local UTC offset at the latest snapshot, for the header clock. `None`
+    /// when the C library cannot report it, in which case no clock is shown.
+    pub utc_offset_secs: Option<i32>,
 }
 
 impl App {
@@ -209,6 +212,7 @@ impl App {
             log: VecDeque::new(),
             acknowledged: false,
             should_quit: false,
+            utc_offset_secs: None,
         }
     }
 
@@ -330,6 +334,7 @@ impl App {
                 }
             }
         }
+        self.utc_offset_secs = crate::clock::local_offset_secs((s.taken_at_ms / 1000) as i64);
         self.snapshot = Some(s);
         self.clamp_selection(old_index);
     }

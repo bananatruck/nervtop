@@ -6,7 +6,7 @@ use crate::{
 };
 use std::{fmt, path::PathBuf};
 
-pub const USAGE: &str = "Usage: nervtop [OPTIONS]\n\n  --config PATH       Read a config file\n  --interval MS       Sample every 250 to 10000 ms\n  --theme NAME        nerv, phosphor, ansi\n  --print-config      Print the complete documented default config\n  --once              Print a live report and exit\n  --json              JSON report, requires --once\n  --screenshot PATH   Render live UI to SVG\n  --size WxH          Screenshot size, 80x24 to 500x200 (default 120x40)\n  --screen NAME       overview, processes, diagnostics (screenshot only)\n  -h, --help          Print help\n  -V, --version       Print version\n\nUse --print-config to see all configuration keys and defaults.\n";
+pub const USAGE: &str = "Usage: nervtop [OPTIONS]\n\n  --config PATH       Read a config file\n  --interval MS       Sample every 250 to 10000 ms\n  --theme NAME        nerv, phosphor, ansi\n  --print-config      Print the complete documented default config\n  --once              Print a live report and exit\n  --json              JSON report, requires --once\n  --screenshot PATH   Render live UI to SVG\n  --size WxH          Screenshot size, 80x24 to 500x200 (default 120x40)\n  --screen NAME       overview, processes, diagnostics (screenshot only)\n  --samples N         Samples taken before the screenshot, 1 to 600 (default 4)\n  -h, --help          Print help\n  -V, --version       Print version\n\nUse --print-config to see all configuration keys and defaults.\n";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Run(Options),
@@ -24,6 +24,9 @@ pub struct Options {
     pub screenshot: Option<PathBuf>,
     pub size: (u16, u16),
     pub screen: Screen,
+    /// Samples taken one interval apart before a screenshot is rendered, so
+    /// history and sustained alert levels are real.
+    pub samples: u32,
 }
 impl Default for Options {
     fn default() -> Self {
@@ -36,6 +39,7 @@ impl Default for Options {
             screenshot: None,
             size: (120, 40),
             screen: Screen::Overview,
+            samples: 4,
         }
     }
 }
@@ -55,6 +59,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command, CliError
     let mut o = Options::default();
     let mut size_set = false;
     let mut screen_set = false;
+    let mut samples_set = false;
     let mut action = None;
     while let Some(arg) = args.next() {
         let (flag, inline) = arg
@@ -62,7 +67,13 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command, CliError
             .map_or((arg.as_str(), None), |(k, v)| (k, Some(v)));
         if matches!(
             flag,
-            "--config" | "--interval" | "--theme" | "--screenshot" | "--size" | "--screen"
+            "--config"
+                | "--interval"
+                | "--theme"
+                | "--screenshot"
+                | "--size"
+                | "--screen"
+                | "--samples"
         ) {
             let value = inline
                 .map(str::to_owned)
@@ -111,6 +122,15 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command, CliError
                     };
                     screen_set = true;
                 }
+                "--samples" => {
+                    let n = value
+                        .parse::<u32>()
+                        .ok()
+                        .filter(|n| (1..=600).contains(n))
+                        .ok_or_else(|| error("--samples must be 1 to 600"))?;
+                    o.samples = n;
+                    samples_set = true;
+                }
                 _ => unreachable!(),
             }
         } else {
@@ -130,8 +150,11 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command, CliError
     if o.json && !o.once {
         return Err(error("--json requires --once"));
     }
-    if (size_set || screen_set) && o.screenshot.is_none() {
-        return Err(error("--size and --screen require --screenshot"));
+    if (size_set || screen_set || samples_set) && o.screenshot.is_none() {
+        return Err(error("--size, --screen and --samples require --screenshot"));
+    }
+    if o.once && o.screenshot.is_some() {
+        return Err(error("--once and --screenshot cannot be combined"));
     }
     Ok(action.unwrap_or(Command::Run(o)))
 }

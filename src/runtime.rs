@@ -163,6 +163,9 @@ pub fn run(collector: Collector, mut app: App) -> io::Result<()> {
     let restore = Restore;
     let mut terminal = ratatui::init();
     let result = (|| {
+        // Paint the frame immediately; panels say "acquiring" until the
+        // warm-up sample arrives about 250 ms later.
+        draw(&mut terminal, &mut app)?;
         loop {
             let event = events_rx
                 .recv()
@@ -178,9 +181,7 @@ pub fn run(collector: Collector, mut app: App) -> io::Result<()> {
                     .map_err(|_| io::Error::other("collector stopped"))?,
                 Step::Draw => (),
             }
-            if app.snapshot.is_some() {
-                draw(&mut terminal, &mut app)?;
-            }
+            draw(&mut terminal, &mut app)?;
         }
         Ok(())
     })();

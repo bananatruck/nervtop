@@ -12,6 +12,7 @@ pub mod format;
 pub mod model;
 pub mod report;
 pub mod runtime;
+pub mod screenshot;
 pub mod svg;
 pub mod theme;
 pub mod ui;

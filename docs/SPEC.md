@@ -83,7 +83,7 @@ Each sample returns `Reading::Available(value)` or `Reading::Unavailable(reason)
 | Temperatures | `/sys/class/hwmon/*/temp*_input` with labels and `crit` values | Unavailable when no readable sensor exists |
 | Fans | `/sys/class/hwmon/*/fan*_input` | Section hidden when the machine exposes no fans |
 | AMD GPU | `/sys/class/drm/card*/device/gpu_busy_percent`, `mem_info_vram_*`, hwmon temperature and power | Per-field unavailable when a file is missing |
-| NVIDIA GPU | `nvidia-smi --query-gpu` CSV with a 2 s timeout, run only when the PCI device's `power/runtime_status` is `active` | When the device is runtime-suspended the GPU shows SUSPENDED and nvidia-smi is not run, so nervtop never wakes a sleeping discrete GPU; when nvidia-smi is missing or fails the GPU shows unavailable with the reason |
+| NVIDIA GPU | `nvidia-smi --query-gpu` CSV with a 2 s timeout, run in a sample only when every NVIDIA display adapter's `power/runtime_status` is `active`, `unsupported` (runtime PM disabled, so always powered) or missing; a killed nvidia-smi that cannot be reaped within 200 ms is left to a background reaper so a sample is never blocked by it | A `suspended` or `suspending` adapter shows SUSPENDED with every field "gpu suspended"; a `resuming` adapter shows "gpu resuming" and an `error` adapter "gpu runtime pm error"; while any NVIDIA adapter is in one of those states nvidia-smi is not run at all, because it enumerates and would wake every NVIDIA device, and the awake NVIDIA adapters show "not queried: another nvidia gpu is asleep"; when nvidia-smi is missing or fails the GPU shows unavailable with the reason |
 | Battery | `/sys/class/power_supply/BAT*` capacity, status, energy or charge, power or current, charge limit | Time remaining only when the discharge or charge rate is known and non-zero; no battery shows "no battery present" |
 | Host | hostname, kernel release and uptime from `sysinfo` | Unknown fields show unavailable |
 
@@ -109,7 +109,7 @@ A rule whose source is unavailable is UNKNOWN and never counts as nominal or as 
 | `swap` percent used | above | 60 | 90 | 2 | Skipped when no swap exists |
 | `disk` percent used | above | 90 | 95 | 1 | Each real mount separately |
 | `storage_temp` degrees C | above | 65 | 75 | 3 | NVMe and drive sensors |
-| `battery` percent | below | 20 | 10 | 2 | Only while discharging |
+| `battery` percent | below | 20 | 10 | 2 | Judged while discharging, or while the status is unknown and AC power is offline; nominal while charging, full, not charging, or unknown on AC; UNKNOWN ("battery status unknown") when the status is unknown and AC state is not reported |
 
 ## Consensus panel
 

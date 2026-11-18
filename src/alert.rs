@@ -487,12 +487,21 @@ fn inputs(s: &Snapshot, rule: RuleId) -> Vec<Input> {
         RuleId::Battery => match &s.battery {
             crate::model::Reading::Unavailable(r) if r == "no battery present" => vec![],
             crate::model::Reading::Unavailable(r) => single(None, Some(r)),
-            crate::model::Reading::Available(b) => vec![(
-                String::new(),
-                Some(b.percent),
-                None,
-                b.status != BatteryStatus::Discharging,
-            )],
+            crate::model::Reading::Available(b) => {
+                // Only a discharging battery is judged. An unknown status
+                // borrows the answer from the AC adapter when there is one.
+                let discharging = match b.status {
+                    BatteryStatus::Discharging => true,
+                    BatteryStatus::Charging | BatteryStatus::Full | BatteryStatus::NotCharging => {
+                        false
+                    }
+                    BatteryStatus::Unknown => match b.ac_online {
+                        Some(online) => !online,
+                        None => return single(None, Some("battery status unknown")),
+                    },
+                };
+                vec![(String::new(), Some(b.percent), None, !discharging)]
+            }
         },
         RuleId::CpuTemp | RuleId::StorageTemp | RuleId::GpuTemp => {
             let kind = match rule {

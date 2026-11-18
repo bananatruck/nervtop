@@ -5,6 +5,7 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::mpsc,
     time::{Duration, Instant},
 };
 
@@ -13,6 +14,32 @@ pub trait CommandRunner: Send {
     fn run(&mut self, program: &str, args: &[&str], timeout: Duration) -> Result<String, String>;
 }
 pub struct SystemCommandRunner;
+
+/// How long a killed nvidia-smi gets to be reaped before it is handed to a
+/// background reaper. A process in uninterruptible sleep ignores SIGKILL until
+/// the kernel call returns, so this must stay bounded.
+const KILL_GRACE: Duration = Duration::from_millis(200);
+
+/// Polls `try_wait` until the child reports an exit or `grace` has passed on
+/// the `now` clock. Returns whether the child exited; never blocks for more
+/// than `grace` plus one poll step.
+fn reaped_within(
+    mut try_wait: impl FnMut() -> std::io::Result<Option<std::process::ExitStatus>>,
+    now: impl Fn() -> Instant,
+    grace: Duration,
+) -> bool {
+    let deadline = now() + grace;
+    loop {
+        if let Ok(Some(_)) = try_wait() {
+            return true;
+        }
+        if now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 impl CommandRunner for SystemCommandRunner {
     fn run(&mut self, program: &str, args: &[&str], timeout: Duration) -> Result<String, String> {
         let mut child = Command::new(program)
@@ -30,9 +57,11 @@ impl CommandRunner for SystemCommandRunner {
             })?;
         let mut stdout = child.stdout.take().ok_or("nvidia-smi stdout unavailable")?;
         // Drain concurrently so even unexpectedly large output cannot fill the pipe.
+        // The text comes back over a channel so collecting it is bounded too.
+        let (text_tx, text_rx) = mpsc::channel();
         let reader = std::thread::spawn(move || {
             let mut text = String::new();
-            stdout.read_to_string(&mut text).map(|_| text)
+            let _ = text_tx.send(stdout.read_to_string(&mut text).map(|_| text));
         });
         let start = Instant::now();
         let result: Result<(), String> = loop {
@@ -47,24 +76,31 @@ impl CommandRunner for SystemCommandRunner {
                 Ok(None) if start.elapsed() < timeout => {
                     std::thread::sleep(Duration::from_millis(10))
                 }
-                Ok(None) => {
+                outcome => {
                     let _ = child.kill();
-                    let _ = child.wait();
-                    break Err("nvidia-smi timeout".into());
-                }
-                Err(_) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    break Err("nvidia-smi wait failed".into());
+                    if !reaped_within(|| child.try_wait(), Instant::now, KILL_GRACE) {
+                        // Still not reaped (uninterruptible sleep): reap it in the
+                        // background so this sample is not blocked by it.
+                        std::thread::spawn(move || {
+                            let _ = child.wait();
+                            let _ = reader.join();
+                        });
+                    }
+                    break Err(if outcome.is_ok() {
+                        "nvidia-smi timeout".into()
+                    } else {
+                        "nvidia-smi wait failed".into()
+                    });
                 }
             }
         };
-        let output = reader
-            .join()
-            .map_err(|_| "nvidia-smi output failed".to_owned())?
-            .map_err(|_| "nvidia-smi output failed".to_owned());
         result?;
-        output
+        // The child has exited, so its stdout normally closes at once; a
+        // descendant still holding the pipe must not stall the sample either.
+        text_rx
+            .recv_timeout((start + timeout + KILL_GRACE).saturating_duration_since(Instant::now()))
+            .map_err(|_| "nvidia-smi output failed".to_owned())?
+            .map_err(|_| "nvidia-smi output failed".to_owned())
     }
 }
 
@@ -199,20 +235,37 @@ fn sys_number<T: std::str::FromStr>(dir: &Path, file: &str) -> Reading<T> {
         .map(Reading::Available)
         .unwrap_or_else(|| Reading::unavailable(format!("{file} not reported")))
 }
+/// Whether a runtime PM status means the device is powered and staying so:
+/// "active", "unsupported" (runtime PM disabled, so always powered) or no
+/// status file at all. Anything else ("suspended", "suspending", "resuming",
+/// "error" or an unrecognized value) means nvidia-smi must not run.
+fn runtime_settled_awake(runtime: Option<&str>) -> bool {
+    matches!(runtime, None | Some("active" | "unsupported"))
+}
 impl Source for Gpus {
     type Output = Vec<GpuStats>;
     fn sample(&mut self) -> Reading<Self::Output> {
         let mut out = Vec::new();
-        for dir in entries(self.root.join("sys/bus/pci/devices")) {
-            if !read(dir.join("class")).is_some_and(|c| c.starts_with("0x03")) {
-                continue;
-            }
-            let hex = |file: &str| {
-                read(dir.join(file))
-                    .and_then(|v| u16::from_str_radix(v.trim_start_matches("0x"), 16).ok())
-            };
-            let vendor_id = hex("vendor");
-            let device_id = hex("device");
+        // Read every display adapter's IDs and runtime PM status once, before
+        // deciding anything: `nvidia-smi --query-gpu` touches every NVIDIA
+        // device, so one asleep NVIDIA adapter rules out the query for all.
+        let adapters: Vec<_> = entries(self.root.join("sys/bus/pci/devices"))
+            .into_iter()
+            .filter(|dir| read(dir.join("class")).is_some_and(|c| c.starts_with("0x03")))
+            .map(|dir| {
+                let hex = |file: &str| {
+                    read(dir.join(file))
+                        .and_then(|v| u16::from_str_radix(v.trim_start_matches("0x"), 16).ok())
+                };
+                let ids = (hex("vendor"), hex("device"));
+                let runtime = read(dir.join("power/runtime_status"));
+                (dir, ids, runtime)
+            })
+            .collect();
+        let nvidia_asleep = adapters.iter().any(|(_, (vendor, _), runtime)| {
+            *vendor == Some(0x10de) && !runtime_settled_awake(runtime.as_deref())
+        });
+        for (dir, (vendor_id, device_id), runtime) in adapters {
             let (vendor, label) = match vendor_id {
                 Some(0x1002) => (GpuVendor::Amd, "AMD"),
                 Some(0x10de) => (GpuVendor::Nvidia, "NVIDIA"),
@@ -241,7 +294,6 @@ impl Source for Gpus {
                 .unwrap_or_default()
                 .to_string_lossy()
                 .into_owned();
-            let runtime = read(dir.join("power/runtime_status"));
             if matches!(runtime.as_deref(), Some("suspended" | "suspending")) {
                 out.push(unavailable(
                     slot,
@@ -260,9 +312,23 @@ impl Source for Gpus {
                 "gpu metrics not supported",
             );
             match vendor {
-                // Only a suspended device is left alone. "active", "resuming",
-                // "unsupported" (runtime PM disabled, so always powered) and a
-                // missing status file all mean the GPU is already awake.
+                GpuVendor::Nvidia if !runtime_settled_awake(runtime.as_deref()) => {
+                    let reason = match runtime.as_deref() {
+                        Some("resuming") => "gpu resuming",
+                        Some("error") => "gpu runtime pm error",
+                        _ => "gpu runtime pm status unrecognized",
+                    };
+                    gpu = unavailable(slot, vendor, gpu.name, GpuPower::Active, reason);
+                }
+                GpuVendor::Nvidia if nvidia_asleep => {
+                    gpu = unavailable(
+                        slot,
+                        vendor,
+                        gpu.name,
+                        GpuPower::Active,
+                        "not queried: another nvidia gpu is asleep",
+                    );
+                }
                 GpuVendor::Nvidia => {
                     self.query();
                     match &self.cached {
@@ -505,9 +571,35 @@ mod tests {
         }
     }
     #[test]
-    fn awake_nvidia_gpu_is_queried_whatever_its_runtime_pm_state() {
+    fn asleep_nvidia_gpu_stops_every_nvidia_query() {
+        let t = tempfile::tempdir().unwrap();
+        device(t.path(), "0000:01:00.0", "0x10de", "0x28e0", "active");
+        device(t.path(), "0000:02:00.0", "0x10de", "0x28e0", "suspended");
+        let (mut g, calls) = source(t.path(), Ok(CSV.into()));
+        let reading = g.sample();
+        let rows = reading.value().unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(rows[0].power_state, GpuPower::Active);
+        let reason = Some("not queried: another nvidia gpu is asleep");
+        assert_eq!(rows[0].utilization_percent.reason(), reason);
+        assert_eq!(rows[0].memory_used_bytes.reason(), reason);
+        assert_eq!(rows[0].memory_total_bytes.reason(), reason);
+        assert_eq!(rows[0].temperature_celsius.reason(), reason);
+        assert_eq!(rows[0].power_watts.reason(), reason);
+        assert_eq!(rows[1].power_state, GpuPower::Suspended);
+        assert_eq!(rows[1].power_watts.reason(), Some("gpu suspended"));
+    }
+    #[test]
+    fn nvidia_gpu_is_queried_only_when_its_runtime_pm_state_is_settled_awake() {
         let status = "sys/bus/pci/devices/0000:01:00.0/power/runtime_status";
-        for runtime in ["active", "resuming", "unsupported", "missing"] {
+        for (runtime, not_queried) in [
+            ("active", None),
+            ("unsupported", None),
+            ("missing", None),
+            ("resuming", Some("gpu resuming")),
+            ("error", Some("gpu runtime pm error")),
+            ("bogus", Some("gpu runtime pm status unrecognized")),
+        ] {
             let t = tempfile::tempdir().unwrap();
             device(t.path(), "0000:01:00.0", "0x10de", "0x28e0", runtime);
             if runtime == "missing" {
@@ -515,15 +607,42 @@ mod tests {
             }
             let (mut g, calls) = source(t.path(), Ok(CSV.into()));
             let gpus = g.sample();
-            assert_eq!(calls.load(Ordering::SeqCst), 1, "{runtime}");
             let gpu = &gpus.value().unwrap()[0];
             assert_eq!(gpu.power_state, GpuPower::Active, "{runtime}");
-            assert_eq!(
-                gpu.temperature_celsius,
-                Reading::Available(48.0),
-                "{runtime}"
-            );
+            match not_queried {
+                None => {
+                    assert_eq!(calls.load(Ordering::SeqCst), 1, "{runtime}");
+                    assert_eq!(
+                        gpu.temperature_celsius,
+                        Reading::Available(48.0),
+                        "{runtime}"
+                    );
+                }
+                Some(reason) => {
+                    assert_eq!(calls.load(Ordering::SeqCst), 0, "{runtime}");
+                    assert_eq!(gpu.utilization_percent.reason(), Some(reason));
+                    assert_eq!(gpu.memory_used_bytes.reason(), Some(reason));
+                    assert_eq!(gpu.memory_total_bytes.reason(), Some(reason));
+                    assert_eq!(gpu.temperature_celsius.reason(), Some(reason));
+                    assert_eq!(gpu.power_watts.reason(), Some(reason));
+                }
+            }
         }
+    }
+    #[test]
+    fn resuming_nvidia_gpu_stops_the_query_for_its_siblings() {
+        let t = tempfile::tempdir().unwrap();
+        device(t.path(), "0000:01:00.0", "0x10de", "0x28e0", "active");
+        device(t.path(), "0000:02:00.0", "0x10de", "0x28e0", "resuming");
+        let (mut g, calls) = source(t.path(), Ok(CSV.into()));
+        let reading = g.sample();
+        let rows = reading.value().unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            rows[0].power_watts.reason(),
+            Some("not queried: another nvidia gpu is asleep")
+        );
+        assert_eq!(rows[1].power_watts.reason(), Some("gpu resuming"));
     }
     #[test]
     fn real_runner_handles_success_failure_missing_and_timeout() {
@@ -548,5 +667,17 @@ mod tests {
                 .unwrap_err(),
             "nvidia-smi timeout"
         );
+        // A descendant that keeps stdout open must not stall the sample.
+        let start = Instant::now();
+        assert_eq!(
+            r.run(
+                "/bin/sh",
+                &["-c", "sleep 3 & echo hi"],
+                Duration::from_millis(100)
+            )
+            .unwrap_err(),
+            "nvidia-smi output failed"
+        );
+        assert!(start.elapsed() < Duration::from_secs(1));
     }
 }

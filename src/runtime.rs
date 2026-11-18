@@ -62,46 +62,59 @@ enum Control {
     Quit,
 }
 
+/// Gap between a baseline sample and the first published one, at start and
+/// after a resume, so rate counters cover a short fresh window.
+const BASELINE: Duration = Duration::from_millis(250);
+
 fn collect_loop(
     mut collector: Collector,
     mut interval: u64,
     controls: Receiver<Control>,
     events: Sender<AppEvent>,
 ) {
+    // The first sample only sets the counter baselines (CPU, disk, network
+    // rates) and is not published.
     collector.sample();
-    let warm_until = Instant::now() + Duration::from_millis(250);
-    let mut warming = true;
-    let mut delay = Duration::from_millis(250);
+    let mut next = Instant::now() + BASELINE;
+    // True while waiting to publish the first sample after a baseline; an
+    // interval change then must not push that sample out.
+    let mut after_baseline = true;
     let mut paused = false;
     loop {
         let control = if paused {
+            // Paused blocks without polling.
             controls.recv().map_err(|_| RecvTimeoutError::Disconnected)
         } else {
-            controls.recv_timeout(if warming {
-                warm_until.saturating_duration_since(Instant::now())
-            } else {
-                delay
-            })
+            controls.recv_timeout(next.saturating_duration_since(Instant::now()))
         };
         match control {
             Ok(Control::Quit) | Err(RecvTimeoutError::Disconnected) => break,
             Ok(Control::Interval(ms)) => {
                 interval = ms;
-                delay = Duration::ZERO;
+                if !after_baseline {
+                    next = Instant::now() + Duration::from_millis(interval);
+                }
             }
-            Ok(Control::Pause(p)) => {
-                paused = p;
-                delay = Duration::ZERO;
+            Ok(Control::Pause(true)) => paused = true,
+            Ok(Control::Pause(false)) => {
+                if paused {
+                    paused = false;
+                    // Refresh the baselines so the next rates do not average
+                    // over the whole paused gap.
+                    collector.sample();
+                    next = Instant::now() + BASELINE;
+                    after_baseline = true;
+                }
             }
             Err(RecvTimeoutError::Timeout) => {
-                warming = false;
                 if events
                     .send(AppEvent::Snapshot(Box::new(collector.sample())))
                     .is_err()
                 {
                     break;
                 }
-                delay = Duration::from_millis(interval);
+                after_baseline = false;
+                next = Instant::now() + Duration::from_millis(interval);
             }
         }
     }
@@ -113,11 +126,36 @@ impl Drop for Restore {
         ratatui::restore();
     }
 }
+/// Ends the main loop when the input thread ends for any reason, a panic
+/// inside `crossterm::event::read` included, so the main loop never waits on
+/// input that will not come. When the main loop is already gone the send
+/// fails and that is fine.
+struct InputExit(Sender<AppEvent>);
+impl Drop for InputExit {
+    fn drop(&mut self) {
+        let _ = self.0.send(AppEvent::Quit);
+    }
+}
 struct CollectorExit(Sender<AppEvent>);
 impl Drop for CollectorExit {
     fn drop(&mut self) {
         let _ = self.0.send(AppEvent::CollectorStopped);
     }
+}
+
+/// Waits at most `within` for the collector thread to finish after it was
+/// told to quit, and joins it if it did. A collector stuck inside `sample()`
+/// is left behind (returning `false`) so quitting never hangs on it; the
+/// process exits without it.
+fn wait_for_collector(collector: thread::JoinHandle<()>, within: Duration) -> bool {
+    let deadline = Instant::now() + within;
+    while !collector.is_finished() {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    collector.join().is_ok()
 }
 
 pub fn run(collector: Collector, mut app: App) -> io::Result<()> {
@@ -140,6 +178,7 @@ pub fn run(collector: Collector, mut app: App) -> io::Result<()> {
     });
     let input_tx = events_tx.clone();
     thread::spawn(move || {
+        let _exit = InputExit(input_tx.clone());
         loop {
             let event = match crossterm::event::read() {
                 Ok(Event::Key(k)) => AppEvent::Key(k),
@@ -186,10 +225,12 @@ pub fn run(collector: Collector, mut app: App) -> io::Result<()> {
         Ok(())
     })();
     let _ = control_tx.send(Control::Quit);
-    signal_handle.close();
     drop(restore);
-    let _ = collector_thread.join();
+    // Drop the signal handlers first so a second Ctrl-C works normally even
+    // if the collector is stuck.
+    signal_handle.close();
     let _ = signal_thread.join();
+    wait_for_collector(collector_thread, Duration::from_secs(1));
     result
 }
 fn draw(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> io::Result<()> {
@@ -243,6 +284,12 @@ mod tests {
     }
     #[test]
     fn collector_warms_pauses_resumes_and_changes_interval() {
+        // Every collector.sample() bumps seq, so seq counts samples taken,
+        // published or not.
+        let seq = |event: AppEvent| match event {
+            AppEvent::Snapshot(s) => s.seq,
+            other => panic!("expected a snapshot, got {other:?}"),
+        };
         let (tx, rx) = mpsc::channel();
         let (events, received) = mpsc::channel();
         let started = Instant::now();
@@ -251,19 +298,79 @@ mod tests {
         tx.send(Control::Interval(10000)).unwrap();
         let first = received.recv_timeout(Duration::from_secs(5)).unwrap();
         assert!(started.elapsed() >= Duration::from_millis(250));
-        assert!(matches!(first,AppEvent::Snapshot(s) if s.seq==2));
+        assert_eq!(seq(first), 2);
+        // An interval change publishes nothing at once; the next sample comes
+        // one full new interval later.
+        let changed = Instant::now();
+        tx.send(Control::Interval(400)).unwrap();
+        assert!(matches!(
+            received.recv_timeout(Duration::from_millis(300)),
+            Err(RecvTimeoutError::Timeout)
+        ));
+        assert_eq!(
+            seq(received.recv_timeout(Duration::from_secs(5)).unwrap()),
+            3
+        );
+        assert!(changed.elapsed() >= Duration::from_millis(400));
+        // Paused: nothing is sampled, whatever the interval does.
         tx.send(Control::Pause(true)).unwrap();
         tx.send(Control::Interval(250)).unwrap();
         assert!(matches!(
             received.recv_timeout(Duration::from_millis(350)),
             Err(RecvTimeoutError::Timeout)
         ));
+        // Resume: one sample refreshes the counter baselines and is dropped,
+        // and exactly one snapshot is published 250 ms later.
+        let resumed = Instant::now();
         tx.send(Control::Pause(false)).unwrap();
-        assert!(
-            matches!(received.recv_timeout(Duration::from_secs(5)).unwrap(),AppEvent::Snapshot(s) if s.seq==3)
+        assert_eq!(
+            seq(received.recv_timeout(Duration::from_secs(5)).unwrap()),
+            5
+        );
+        assert!(resumed.elapsed() >= Duration::from_millis(250));
+        assert!(matches!(
+            received.recv_timeout(Duration::from_millis(150)),
+            Err(RecvTimeoutError::Timeout)
+        ));
+        // Then sampling continues at the interval.
+        assert_eq!(
+            seq(received.recv_timeout(Duration::from_secs(5)).unwrap()),
+            6
         );
         tx.send(Control::Quit).unwrap();
         worker.join().unwrap();
+    }
+    #[test]
+    fn stopping_a_stuck_collector_is_bounded() {
+        let (control, _ignored) = mpsc::channel();
+        // A collector stuck inside sample() never reads its controls.
+        let stuck = thread::spawn(|| {
+            loop {
+                thread::park();
+            }
+        });
+        let (done, finished) = mpsc::channel();
+        thread::spawn(move || {
+            let start = Instant::now();
+            let _ = control.send(Control::Quit);
+            let stopped = wait_for_collector(stuck, Duration::from_secs(1));
+            let _ = done.send((stopped, start.elapsed()));
+        });
+        let (stopped, elapsed) = finished
+            .recv_timeout(Duration::from_secs(3))
+            .expect("quit must not wait on a stuck collector");
+        assert!(!stopped);
+        assert!(elapsed < Duration::from_millis(1500), "{elapsed:?}");
+    }
+    #[test]
+    fn stopping_a_healthy_collector_joins_it() {
+        let (control, controls) = mpsc::channel();
+        let (events, _received) = mpsc::channel();
+        let worker = thread::spawn(move || collect_loop(collector(), 10000, controls, events));
+        let start = Instant::now();
+        control.send(Control::Quit).unwrap();
+        assert!(wait_for_collector(worker, Duration::from_secs(1)));
+        assert!(start.elapsed() < Duration::from_millis(500));
     }
     #[test]
     fn collector_control_disconnect_exits() {
@@ -282,6 +389,20 @@ mod tests {
         });
         assert!(worker.join().is_err());
         assert!(matches!(rx.recv().unwrap(), AppEvent::CollectorStopped));
+    }
+    #[test]
+    fn input_exit_sends_quit_even_during_panic() {
+        let (tx, rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let _exit = InputExit(tx);
+            panic!("test input failure");
+        });
+        assert!(worker.join().is_err());
+        assert!(matches!(rx.recv().unwrap(), AppEvent::Quit));
+        // With the main loop gone the failed send is ignored, not a panic.
+        let (tx, rx) = mpsc::channel();
+        drop(rx);
+        drop(InputExit(tx));
     }
     #[test]
     #[ignore = "requires a terminal and permission for local socket sends; run alone with --ignored --exact runtime::tests::terminal_restored_after_sigterm"]

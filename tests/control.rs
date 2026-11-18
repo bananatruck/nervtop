@@ -460,7 +460,6 @@ fn battery_not_discharging() {
         BatteryStatus::Charging,
         BatteryStatus::Full,
         BatteryStatus::NotCharging,
-        BatteryStatus::Unknown,
     ] {
         let mut s = snapshot();
         s.battery = Reading::Available(battery(1., state));
@@ -468,6 +467,33 @@ fn battery_not_discharging() {
         assert_eq!(status(&e, RuleId::Battery).level, Level::Nominal);
         assert_eq!(status(&e, RuleId::Battery).value, Some(1.));
     }
+}
+#[test]
+fn battery_unknown_status_follows_ac_power() {
+    let judge = |ac_online: Option<bool>| {
+        let mut b = battery(5., BatteryStatus::Unknown);
+        b.ac_online = ac_online;
+        let mut s = snapshot();
+        s.battery = Reading::Available(b);
+        status(
+            &AlertEngine::default().evaluate(&s, &instant()),
+            RuleId::Battery,
+        )
+        .clone()
+    };
+    // On battery power an unknown status is judged as discharging.
+    let off_ac = judge(Some(false));
+    assert_eq!(off_ac.level, Level::Critical);
+    assert_eq!(off_ac.value, Some(5.));
+    // On AC it is nominal, like charging.
+    let on_ac = judge(Some(true));
+    assert_eq!(on_ac.level, Level::Nominal);
+    assert_eq!(on_ac.value, Some(5.));
+    // Without AC information nothing can be said.
+    let unknown = judge(None);
+    assert_eq!(unknown.level, Level::Unknown);
+    assert_eq!(unknown.value, None);
+    assert_eq!(unknown.note.as_deref(), Some("battery status unknown"));
 }
 #[test]
 fn battery_absent() {

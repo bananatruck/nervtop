@@ -55,13 +55,46 @@ const GENERIC_PROCESSES: &[&str] = &[
 
 /// System accounts shown unchanged; every other user becomes "user".
 const SYSTEM_USERS: &[&str] = &[
-    "root", "dbus", "polkitd", "gdm", "nobody", "avahi", "rtkit", "colord", "geoclue",
+    "root",
+    "dbus",
+    "polkitd",
+    "gdm",
+    "nobody",
+    "avahi",
+    "rtkit",
+    "colord",
+    "geoclue",
+    "systemd-network",
+    "systemd-resolve",
+    "systemd-timesync",
+    "systemd-journal",
+    "systemd-journal-remote",
+    "systemd-oom",
+    "systemd-coredump",
+];
+
+/// Mount points shown unchanged; any other becomes `/mnt/disk-N`, because
+/// paths such as `/home/<name>` or `/run/media/<name>/<label>` identify
+/// people and projects.
+const STANDARD_MOUNTS: &[&str] = &[
+    "/",
+    "/boot",
+    "/boot/efi",
+    "/efi",
+    "/home",
+    "/var",
+    "/tmp",
+    "/usr",
+    "/opt",
+    "/srv",
+    "/nix",
 ];
 
 #[derive(Debug, Default)]
 pub struct Redactor {
     processes: HashMap<String, String>,
     interfaces: HashMap<String, String>,
+    mounts: HashMap<String, String>,
 }
 
 impl Redactor {
@@ -85,7 +118,7 @@ impl Redactor {
         }
         if let Reading::Available(disks) = &mut s.disks {
             for d in disks.iter_mut() {
-                d.mount_point = mask_home(&d.mount_point);
+                d.mount_point = self.mount_point(&d.mount_point);
             }
         }
     }
@@ -113,35 +146,42 @@ impl Redactor {
     }
 }
 
-fn is_system_user(user: &str) -> bool {
-    SYSTEM_USERS.contains(&user) || user.starts_with("systemd-")
+impl Redactor {
+    /// Standard mount points unchanged, every other one a distinct stable alias.
+    pub fn mount_point(&mut self, mount: &str) -> String {
+        if STANDARD_MOUNTS.contains(&mount) {
+            return mount.to_owned();
+        }
+        let next = self.mounts.len() + 1;
+        self.mounts
+            .entry(mount.to_owned())
+            .or_insert_with(|| format!("/mnt/disk-{next}"))
+            .clone()
+    }
 }
 
-/// `lo`, `ethN`, `wlanN` and systemd predictable names (`enp3s0`, `wlp2s0`).
+fn is_system_user(user: &str) -> bool {
+    SYSTEM_USERS.contains(&user)
+}
+
+/// `lo`, `ethN`, `wlanN`, and systemd predictable names built only from
+/// bus positions (`eno1`, `ens33`, `enp0s31f6`, `wlp2s0`, `enp5s0u1`).
+/// MAC-based names (`enx001122aabbcc`) and anything else are masked.
 fn is_standard_interface(name: &str) -> bool {
     let digits_after = |prefix: &str| {
         name.strip_prefix(prefix)
             .is_some_and(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()))
     };
-    name == "lo"
-        || digits_after("eth")
-        || digits_after("wlan")
-        || ((name.starts_with("en") || name.starts_with("wl"))
-            && name.len() <= 15
-            && name.chars().all(|c| c.is_ascii_alphanumeric())
-            && name.chars().any(|c| c.is_ascii_digit()))
-}
-
-/// `/home/<name>/...` becomes `/home/user/...`.
-fn mask_home(mount: &str) -> String {
-    let mut parts = mount.splitn(4, '/');
-    match (parts.next(), parts.next(), parts.next(), parts.next()) {
-        (Some(""), Some("home"), Some(_), rest) => match rest {
-            Some(rest) => format!("/home/user/{rest}"),
-            None => "/home/user".to_owned(),
-        },
-        _ => mount.to_owned(),
+    if name == "lo" || digits_after("eth") || digits_after("wlan") {
+        return true;
     }
+    let Some(rest) = ["en", "wl", "ww"].iter().find_map(|p| name.strip_prefix(p)) else {
+        return false;
+    };
+    let mut chars = rest.chars();
+    matches!(chars.next(), Some('o' | 's' | 'p' | 'P' | 'v' | 'b'))
+        && rest.chars().any(|c| c.is_ascii_digit())
+        && chars.all(|c| c.is_ascii_digit() || "psfdnuci".contains(c))
 }
 
 #[cfg(test)]
@@ -203,12 +243,34 @@ mod tests {
         let n = s.network.value().unwrap();
         assert_eq!(n[0].name, "net-1");
         assert_eq!(n[1].name, "wlp2s0");
-        assert_eq!(s.disks.value().unwrap()[0].mount_point, "/home/user/data");
+        assert_eq!(s.disks.value().unwrap()[0].mount_point, "/mnt/disk-1");
         assert_eq!(s.host.hostname, Reading::Available(HOSTNAME.into()));
         let json = serde_json::to_string(&s).unwrap();
         for leak in ["kesh", "secret-tool", "tailscale"] {
             assert!(!json.contains(leak), "{leak} leaked");
         }
+    }
+
+    #[test]
+    fn identifiers_hidden_in_standard_looking_names_are_masked() {
+        for n in ["enx001122aabbcc", "enalice1", "wlbob2"] {
+            assert!(!is_standard_interface(n), "{n}");
+        }
+        for n in ["enp0s31f6", "wlp0s20f3", "eno1", "ens33", "enp5s0u1"] {
+            assert!(is_standard_interface(n), "{n}");
+        }
+        assert!(!is_system_user("systemd-alice"));
+        assert!(is_system_user("systemd-timesync"));
+    }
+
+    #[test]
+    fn distinct_private_mounts_get_distinct_aliases() {
+        let mut r = Redactor::default();
+        assert_eq!(r.mount_point("/home/alice"), "/mnt/disk-1");
+        assert_eq!(r.mount_point("/run/media/alice/ClientAcme"), "/mnt/disk-2");
+        assert_eq!(r.mount_point("/home/alice"), "/mnt/disk-1", "stable");
+        assert_eq!(r.mount_point("/boot/efi"), "/boot/efi");
+        assert_eq!(r.mount_point("/"), "/");
     }
 
     #[test]
@@ -225,8 +287,5 @@ mod tests {
         ] {
             assert!(!is_standard_interface(n), "{n}");
         }
-        assert_eq!(mask_home("/"), "/");
-        assert_eq!(mask_home("/boot"), "/boot");
-        assert_eq!(mask_home("/home/kesh"), "/home/user");
     }
 }

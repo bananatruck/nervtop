@@ -13,7 +13,7 @@ optdepends=(
   'hwdata: GPU model names'
 )
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('271b6046a609ed64988acbc1a765d9bf8283062467e09a9c61fcd26d517d79f4')
 
 prepare() {
   cd "$pkgname-$pkgver"

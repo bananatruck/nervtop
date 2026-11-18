@@ -27,14 +27,7 @@ impl Source for Processes {
             return Reading::unavailable("process initialization failed");
         };
         // UID is fetched once for new processes. No command, environment, disk or path refresh.
-        s.refresh_processes_specifics(
-            ProcessesToUpdate::All,
-            true,
-            ProcessRefreshKind::nothing()
-                .with_cpu()
-                .with_memory()
-                .with_user(UpdateKind::OnlyIfNotSet),
-        );
+        s.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh_kind());
         if !std::mem::replace(&mut self.warmed, true) {
             return Reading::unavailable("warming up");
         }
@@ -83,6 +76,15 @@ impl Source for Processes {
         Reading::Available(out)
     }
 }
+/// CPU and memory for every process, the user only for new ones.
+fn refresh_kind() -> ProcessRefreshKind {
+    ProcessRefreshKind::nothing()
+        .with_cpu()
+        .with_memory()
+        .with_user(UpdateKind::OnlyIfNotSet)
+        .without_tasks()
+}
+
 fn state(s: ProcessStatus) -> &'static str {
     match s {
         ProcessStatus::Idle => "idle",
@@ -99,5 +101,19 @@ fn state(s: ProcessStatus) -> &'static str {
         ProcessStatus::UninterruptibleDiskSleep => "disk",
         ProcessStatus::Suspended => "suspend",
         ProcessStatus::Unknown(_) => "unknown",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn refresh_skips_per_thread_task_scans() {
+        // Walking /proc/<pid>/task/* for every process cost about 90 ms per
+        // sample on a desktop with ~550 processes; threads are not shown.
+        let kind = refresh_kind();
+        assert!(!kind.tasks());
+        assert!(kind.cpu() && kind.memory());
     }
 }

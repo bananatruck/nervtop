@@ -22,6 +22,8 @@ impl Source for Battery {
         let Some(dir) = supplies.iter().find(|d| {
             read(d.join("type")).as_deref() == Some("Battery")
                 && number::<u8>(d.join("present")) != Some(0)
+                // Mice, keyboards and headsets report scope "Device".
+                && read(d.join("scope")).as_deref() != Some("Device")
         }) else {
             return Reading::unavailable("no battery present");
         };
@@ -108,6 +110,31 @@ mod tests {
         }
         super::super::sensors::tests::put(t.path(), "sys/class/power_supply/BAT1/type", "Battery");
         t
+    }
+    #[test]
+    fn peripheral_batteries_are_not_the_system_battery() {
+        let t = tempfile::tempdir().unwrap();
+        let put = super::super::sensors::tests::put;
+        put(
+            t.path(),
+            "sys/class/power_supply/hidpp_battery_0/type",
+            "Battery",
+        );
+        put(
+            t.path(),
+            "sys/class/power_supply/hidpp_battery_0/scope",
+            "Device",
+        );
+        put(
+            t.path(),
+            "sys/class/power_supply/hidpp_battery_0/capacity",
+            "40",
+        );
+        let mut b = Battery::new(t.path().into());
+        assert_eq!(b.sample().reason(), Some("no battery present"));
+        put(t.path(), "sys/class/power_supply/BAT0/type", "Battery");
+        put(t.path(), "sys/class/power_supply/BAT0/capacity", "77");
+        assert_eq!(b.sample().value().unwrap().name, "BAT0");
     }
     #[test]
     fn target_charge_units() {

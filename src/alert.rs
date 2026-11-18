@@ -262,7 +262,10 @@ impl AlertEngine {
                 continue;
             }
             for (subject, value, note, nominal) in inputs(snapshot, rule) {
-                let key = (rule, subject.clone());
+                // Disks are judged per mount. Every other rule judges one
+                // value (for temperatures, the hottest sensor), so its state
+                // must survive the hottest sensor changing name.
+                let key = (rule, state_subject(rule, &subject));
                 let mut state = self.states.remove(&key).unwrap_or(RuleState {
                     level: Level::Unknown,
                     warn_samples: 0,
@@ -309,15 +312,7 @@ impl AlertEngine {
                 rules
                     .iter()
                     .find(|r| r.rule.cell() == cell && r.level == vote)
-                    .map(|r| {
-                        format!(
-                            "{} {} {}{}",
-                            r.rule.label(),
-                            r.subject,
-                            r.value.expect("alert levels have a measured value"),
-                            r.rule.unit()
-                        )
-                    })
+                    .map(describe)
             } else {
                 None
             };
@@ -396,6 +391,43 @@ impl RuleState {
             Level::Nominal
         };
         self.level = retained.max(raised);
+    }
+}
+
+fn state_subject(rule: RuleId, subject: &str) -> String {
+    if rule == RuleId::Disk {
+        subject.to_owned()
+    } else {
+        String::new()
+    }
+}
+
+/// "CPU TEMP k10temp Tctl 89.3°C": label, subject when there is one, value.
+fn describe(r: &RuleStatus) -> String {
+    let mut parts = vec![r.rule.label().to_owned()];
+    if !r.subject.is_empty() {
+        parts.push(r.subject.clone());
+    }
+    parts.push(r.value_text());
+    parts.join(" ")
+}
+
+impl RuleStatus {
+    /// The value with its unit, for example "89.3°C" or "0.21/core", or
+    /// "unavailable".
+    pub fn value_text(&self) -> String {
+        self.value
+            .map(|v| format_rule_value(self.rule, v))
+            .unwrap_or_else(|| "unavailable".to_owned())
+    }
+}
+
+/// A threshold or value of `rule` with its unit.
+pub fn format_rule_value(rule: RuleId, v: f64) -> String {
+    if rule == RuleId::Load {
+        format!("{v:.2}{}", rule.unit())
+    } else {
+        format!("{v:.1}{}", rule.unit())
     }
 }
 
@@ -507,6 +539,68 @@ fn inputs(s: &Snapshot, rule: RuleId) -> Vec<Input> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn thermal_snapshot(temps: &[(&str, f64)], seq: u64) -> Snapshot {
+        use crate::model::*;
+        let mut s = crate::collect::fake::sample_snapshot();
+        s.seq = seq;
+        s.sensors = Reading::Available(SensorStats {
+            temps: temps
+                .iter()
+                .map(|(label, c)| TempSensor {
+                    chip: "k10temp".into(),
+                    label: (*label).into(),
+                    kind: SensorKind::Cpu,
+                    celsius: *c,
+                    crit_celsius: None,
+                })
+                .collect(),
+            fans: vec![],
+        });
+        s
+    }
+
+    fn cpu_temp(eval: &Evaluation) -> &RuleStatus {
+        eval.rules
+            .iter()
+            .find(|r| r.rule == RuleId::CpuTemp)
+            .expect("cpu_temp evaluated")
+    }
+
+    #[test]
+    fn hottest_sensor_changing_does_not_reset_sustain() {
+        let config = crate::config::AlertConfig::default();
+        let mut engine = AlertEngine::default();
+        let samples = [
+            [("Tctl", 90.0), ("Tccd1", 88.0)],
+            [("Tctl", 88.0), ("Tccd1", 91.0)],
+            [("Tctl", 92.0), ("Tccd1", 89.0)],
+        ];
+        let mut last = None;
+        for (i, temps) in samples.iter().enumerate() {
+            last = Some(engine.evaluate(&thermal_snapshot(temps, i as u64 + 1), &config));
+        }
+        let eval = last.unwrap();
+        assert_eq!(cpu_temp(&eval).level, Level::Caution);
+        assert_eq!(cpu_temp(&eval).subject, "k10temp Tctl");
+    }
+
+    #[test]
+    fn consensus_reason_uses_one_decimal() {
+        let config = crate::config::AlertConfig::default();
+        let mut engine = AlertEngine::default();
+        let mut eval = None;
+        for seq in 1..=3 {
+            eval = Some(engine.evaluate(&thermal_snapshot(&[("Tctl", 89.254_321)], seq), &config));
+        }
+        let eval = eval.unwrap();
+        let thermal = &eval.consensus.cells[1];
+        assert_eq!(thermal.vote, Level::Caution);
+        assert_eq!(
+            thermal.reason.as_deref(),
+            Some("CPU TEMP k10temp Tctl 89.3°C")
+        );
+    }
 
     #[test]
     fn worst_skips_unknown_unless_all_unknown() {

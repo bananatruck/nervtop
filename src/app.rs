@@ -491,6 +491,11 @@ impl App {
             }
             K::Char('/') => self.procs.mode = InputMode::Filter,
             K::Char('a') => self.acknowledged = true,
+            K::Esc => {
+                // A filter kept with Enter stays until Esc clears it.
+                self.procs.filter.clear();
+                self.clamp_selection(0);
+            }
             K::Char('j' | 'k' | 'g' | 'G') | K::Down | K::Up | K::PageDown | K::PageUp => {
                 let len = self.visible_processes().len();
                 let i = self.selected_index();

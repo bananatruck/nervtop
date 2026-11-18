@@ -704,6 +704,17 @@ fn filter_escape() {
     assert_eq!(a.procs.mode, InputMode::Normal);
 }
 #[test]
+fn escape_clears_a_kept_filter() {
+    let mut a = app();
+    for k in [K::Char('/'), K::Char('a'), K::Enter] {
+        key(&mut a, k);
+    }
+    assert_eq!(a.procs.filter, "a");
+    assert_eq!(key(&mut a, K::Esc), Effect::Redraw);
+    assert!(a.procs.filter.is_empty());
+    assert_eq!(key(&mut a, K::Esc), Effect::None, "nothing left to clear");
+}
+#[test]
 fn release_ignored() {
     let mut a = app();
     let mut k = KeyEvent::new(K::Char('q'), M::NONE);

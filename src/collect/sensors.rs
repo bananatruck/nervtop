@@ -70,7 +70,7 @@ impl Source for Sensors {
                 }
             }
         }
-        if stats.temps.is_empty() {
+        if stats.temps.is_empty() && stats.fans.is_empty() {
             Reading::unavailable("no hwmon sensors")
         } else {
             Reading::Available(stats)
@@ -84,6 +84,16 @@ pub(crate) mod tests {
         let path = root.join(path);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, text).unwrap();
+    }
+    #[test]
+    fn fans_are_reported_without_any_temperature() {
+        let t = tempfile::tempdir().unwrap();
+        put(t.path(), "sys/class/hwmon/hwmon0/name", "asus");
+        put(t.path(), "sys/class/hwmon/hwmon0/fan1_input", "2200");
+        let s = Sensors::new(t.path().into()).sample();
+        let s = s.value().expect("fans alone are data");
+        assert!(s.temps.is_empty());
+        assert_eq!(s.fans[0].rpm, 2200);
     }
     #[test]
     fn laptop_hwmon_tree_skips_unreadable_inputs() {

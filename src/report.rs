@@ -6,6 +6,7 @@ use crate::{
     config::AlertConfig,
     format::*,
     model::*,
+    redact::Redactor,
 };
 use std::{fmt::Write, thread, time::Duration};
 
@@ -22,13 +23,17 @@ pub fn once(
     collector: &mut Collector,
     interval_ms: u64,
     config: &AlertConfig,
+    redactor: Option<&mut Redactor>,
 ) -> (Snapshot, Evaluation) {
     collector.sample();
     thread::sleep(Duration::from_millis(250));
     collector.sample();
     // Rates and CPU usage in the reported sample cover one full interval.
     thread::sleep(Duration::from_millis(interval_ms));
-    let snapshot = collector.sample();
+    let mut snapshot = collector.sample();
+    if let Some(r) = redactor {
+        r.apply(&mut snapshot);
+    }
     let instant = AlertConfig {
         sustain: 1,
         ..config.clone()
@@ -414,7 +419,7 @@ mod tests {
         let mut collector = Collector::new(fake::sources_with(snap));
         let config = AlertConfig::default();
         assert_eq!(config.sustain, 3);
-        let (_, eval) = once(&mut collector, 250, &config);
+        let (_, eval) = once(&mut collector, 250, &config, None);
         let disk = eval.rules.iter().find(|r| r.rule == RuleId::Disk).unwrap();
         assert_eq!(disk.level, Level::Critical);
         let text = text(&fake::sample_snapshot(), &eval);
@@ -435,7 +440,7 @@ mod tests {
     fn reported_sample_is_a_full_interval_after_the_baseline() {
         let mut collector = Collector::new(fake::sources_with(fake::sample_snapshot()));
         let started = std::time::Instant::now();
-        once(&mut collector, 250, &AlertConfig::default());
+        once(&mut collector, 250, &AlertConfig::default(), None);
         // 250 ms warm-up to baseline, then one full 250 ms interval.
         assert!(
             started.elapsed() >= Duration::from_millis(500),

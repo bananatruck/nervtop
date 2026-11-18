@@ -10,6 +10,7 @@ pub mod collect;
 pub mod config;
 pub mod format;
 pub mod model;
+pub mod redact;
 pub mod report;
 pub mod runtime;
 pub mod screenshot;

@@ -6,7 +6,7 @@ use crate::{
 };
 use std::{fmt, path::PathBuf};
 
-pub const USAGE: &str = "Usage: nervtop [OPTIONS]\n\n  --config PATH       Read a config file\n  --interval MS       Sample every 250 to 10000 ms\n  --theme NAME        nerv, phosphor, ansi\n  --print-config      Print the complete documented default config\n  --once              Print a live report and exit\n  --json              JSON report, requires --once\n  --screenshot PATH   Render live UI to SVG\n  --size WxH          Screenshot size, 80x24 to 500x200 (default 120x40)\n  --screen NAME       overview, processes, diagnostics (screenshot only)\n  --samples N         Samples taken before the screenshot, 1 to 600 (default 4)\n  -h, --help          Print help\n  -V, --version       Print version\n\nUse --print-config to see all configuration keys and defaults.\n";
+pub const USAGE: &str = "Usage: nervtop [OPTIONS]\n\n  --config PATH       Read a config file\n  --interval MS       Sample every 250 to 10000 ms\n  --theme NAME        nerv, phosphor, ansi\n  --print-config      Print the complete documented default config\n  --once              Print a live report and exit\n  --json              JSON report, requires --once\n  --screenshot PATH   Render live UI to SVG\n  --size WxH          Screenshot size, 80x24 to 500x200 (default 120x40)\n  --screen NAME       overview, processes, diagnostics (screenshot only)\n  --samples N         Samples taken before the screenshot, 1 to 600 (default 4)\n  --redact            With --once or --screenshot: mask host, user, process and interface names\n  -h, --help          Print help\n  -V, --version       Print version\n\nUse --print-config to see all configuration keys and defaults.\n";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Run(Options),
@@ -27,6 +27,8 @@ pub struct Options {
     /// Samples taken one interval apart before a screenshot is rendered, so
     /// history and sustained alert levels are real.
     pub samples: u32,
+    /// Mask identifying names (see `redact`) in `--once` and `--screenshot` output.
+    pub redact: bool,
 }
 impl Default for Options {
     fn default() -> Self {
@@ -40,6 +42,7 @@ impl Default for Options {
             size: (120, 40),
             screen: Screen::Overview,
             samples: 4,
+            redact: false,
         }
     }
 }
@@ -139,6 +142,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command, CliError
             }
             match flag {
                 "--once" => o.once = true,
+                "--redact" => o.redact = true,
                 "--json" => o.json = true,
                 "--print-config" => action = Some(Command::PrintConfig),
                 "--help" | "-h" => action = Some(Command::Help),
@@ -152,6 +156,9 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command, CliError
     }
     if (size_set || screen_set || samples_set) && o.screenshot.is_none() {
         return Err(error("--size, --screen and --samples require --screenshot"));
+    }
+    if o.redact && !o.once && o.screenshot.is_none() {
+        return Err(error("--redact requires --once or --screenshot"));
     }
     if o.once && o.screenshot.is_some() {
         return Err(error("--once and --screenshot cannot be combined"));

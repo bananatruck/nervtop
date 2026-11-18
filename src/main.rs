@@ -64,8 +64,14 @@ fn build_app(options: &Options) -> Result<App, config::ConfigError> {
 
 fn run(options: Options, mut app: App) -> std::io::Result<()> {
     let mut collector = Collector::system();
+    let mut redactor = options.redact.then(nervtop::redact::Redactor::default);
     if options.once {
-        let (snapshot, eval) = report::once(&mut collector, app.interval_ms, &app.config.alerts);
+        let (snapshot, eval) = report::once(
+            &mut collector,
+            app.interval_ms,
+            &app.config.alerts,
+            redactor.as_mut(),
+        );
         let out = if options.json {
             report::json(&snapshot, &eval)
         } else {
@@ -74,7 +80,7 @@ fn run(options: Options, mut app: App) -> std::io::Result<()> {
         return write_stdout(&format!("{out}\n"));
     }
     if let Some(path) = &options.screenshot {
-        screenshot::collect(&mut collector, &mut app, options.samples);
+        screenshot::collect(&mut collector, &mut app, options.samples, redactor.as_mut());
         let (w, h) = options.size;
         std::fs::write(path, screenshot::svg(&mut app, w, h))?;
         return Ok(());

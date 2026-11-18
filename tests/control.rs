@@ -273,6 +273,12 @@ fn cli_samples() {
     }
 }
 #[test]
+fn cli_redact_needs_once_or_screenshot() {
+    assert!(opts("--once --redact").redact);
+    assert!(opts("--screenshot a.svg --redact").redact);
+    assert!(parse("--redact").is_err());
+}
+#[test]
 fn cli_once_and_screenshot_are_exclusive() {
     assert!(parse("--once --screenshot a.svg").is_err());
 }

@@ -6,21 +6,32 @@
 
 use crate::app::App;
 use crate::collect::Collector;
+use crate::redact::Redactor;
 use crate::svg::buffer_to_svg;
 use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
 use std::thread::sleep;
 use std::time::Duration;
 
 /// Feeds `app` with `samples` snapshots one interval apart, after a 250 ms
-/// warm-up sample so the first one already has CPU usage and rates.
-pub fn collect(collector: &mut Collector, app: &mut App, samples: u32) {
+/// warm-up sample so the first one already has CPU usage and rates. With a
+/// redactor, names are masked before the app sees them; numbers stay real.
+pub fn collect(
+    collector: &mut Collector,
+    app: &mut App,
+    samples: u32,
+    mut redactor: Option<&mut Redactor>,
+) {
     collector.sample();
     sleep(Duration::from_millis(250));
     for i in 0..samples {
         if i > 0 {
             sleep(Duration::from_millis(app.interval_ms));
         }
-        app.apply_snapshot(collector.sample());
+        let mut snapshot = collector.sample();
+        if let Some(r) = redactor.as_deref_mut() {
+            r.apply(&mut snapshot);
+        }
+        app.apply_snapshot(snapshot);
     }
 }
 

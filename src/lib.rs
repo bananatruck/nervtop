@@ -4,6 +4,7 @@
 
 pub mod alert;
 pub mod app;
+pub mod cli;
 pub mod collect;
 pub mod config;
 pub mod model;

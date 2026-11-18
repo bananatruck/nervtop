@@ -116,3 +116,21 @@ fn screenshot_writes_an_svg_of_the_requested_size() {
     assert!(svg.starts_with("<svg"), "{}", &svg[..svg.len().min(200)]);
     assert!(svg.contains("PROCESSES"));
 }
+
+#[test]
+fn a_closed_stdout_is_not_a_crash() {
+    use std::process::Stdio;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_nervtop"))
+        .args(["--once", "--json", "--interval", "250"])
+        .env("XDG_CONFIG_HOME", env!("CARGO_TARGET_TMPDIR"))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run nervtop");
+    // Close the read end before nervtop writes, like `nervtop --once | head -0`.
+    drop(child.stdout.take());
+    let out = child.wait_with_output().expect("wait");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!err.contains("panicked"), "{err}");
+    assert_eq!(out.status.code(), Some(0), "{err}");
+}

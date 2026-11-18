@@ -15,16 +15,13 @@ fn main() -> ExitCode {
     };
     let options = match command {
         Command::Help => {
-            print!("{USAGE}");
-            return ExitCode::SUCCESS;
+            return emit(USAGE);
         }
         Command::Version => {
-            println!("nervtop {}", env!("CARGO_PKG_VERSION"));
-            return ExitCode::SUCCESS;
+            return emit(&format!("nervtop {}\n", env!("CARGO_PKG_VERSION")));
         }
         Command::PrintConfig => {
-            print!("{DEFAULT_TOML}");
-            return ExitCode::SUCCESS;
+            return emit(DEFAULT_TOML);
         }
         Command::Run(options) => options,
     };
@@ -74,8 +71,7 @@ fn run(options: Options, mut app: App) -> std::io::Result<()> {
         } else {
             report::text(&snapshot, &eval)
         };
-        println!("{out}");
-        return Ok(());
+        return write_stdout(&format!("{out}\n"));
     }
     if let Some(path) = &options.screenshot {
         screenshot::collect(&mut collector, &mut app, options.samples);
@@ -84,4 +80,25 @@ fn run(options: Options, mut app: App) -> std::io::Result<()> {
         return Ok(());
     }
     runtime::run(collector, app)
+}
+
+/// Writes `text` to stdout. A reader that closed the pipe early (for example
+/// `nervtop --once | head`) is a normal end, not an error.
+fn write_stdout(text: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    match out.write_all(text.as_bytes()).and_then(|()| out.flush()) {
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        other => other,
+    }
+}
+
+fn emit(text: &str) -> ExitCode {
+    match write_stdout(text) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("nervtop: {e}");
+            ExitCode::FAILURE
+        }
+    }
 }

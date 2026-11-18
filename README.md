@@ -10,6 +10,7 @@ Per-core CPU, memory, GPUs, temperatures and fans, storage, network, battery and
 ![nervtop overview screen with live data](docs/screenshots/overview.png)
 
 The screenshot is the real program with live data from an ASUS laptop, rendered by `scripts/screenshots.sh`; the root filesystem really was 98 percent full, which is why the banner is up.
+The screenshots use `--redact`, so the hostname, user names, non-generic process names and non-standard network interface names are replaced with neutral labels (`nervtop-demo`, `user`, `app-07`, `net-2`); every number is real.
 
 nervtop is the terminal companion to [NERV Fieldnotes](https://github.com/bananatruck/nerv-fieldnotes) and shares its palette: a charcoal green ground, amber headings, orange accents and pale green for healthy values.
 The look borrows the language of an anime control room (hexagonal status cells, warning-stripe banners, a three-way vote) as original work.
@@ -195,6 +196,7 @@ Usage: nervtop [OPTIONS]
   --size WxH          Screenshot size, 80x24 to 500x200 (default 120x40)
   --screen NAME       overview, processes, diagnostics (screenshot only)
   --samples N         Samples taken before the screenshot, 1 to 600 (default 4)
+  --redact            With --once or --screenshot: mask host, user, process and interface names
   -h, --help          Print help
   -V, --version       Print version
 
@@ -203,6 +205,7 @@ Use --print-config to see all configuration keys and defaults.
 
 `nervtop --once` prints a plain text report of every reading (the 15 busiest processes rather than the full list), every rule and the consensus, which is handy over SSH or in a script.
 `nervtop --once --json` prints the full snapshot, every rule and the consensus as JSON for other tools and agents.
+Add `--redact` to `--once` or `--screenshot` before sharing the output: it masks the hostname, user names other than system accounts, process names outside a short list of generic programs, network interface names other than `lo`, `ethN`, `wlanN` and predictable `en*` or `wl*` names, and `/home/<name>` mount points, and leaves every number unchanged.
 A one-shot report has no history, so its alert levels are instantaneous (sustain 1).
 
 ## Where the numbers come from

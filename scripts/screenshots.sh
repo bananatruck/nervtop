@@ -18,10 +18,11 @@ command -v rsvg-convert >/dev/null || { echo "rsvg-convert (librsvg) is required
 
 shot() {
   local name="$1" screen="$2" size="$3"; shift 3
+  # --redact masks host, user, process and interface names; numbers stay real.
   # 40 samples 500 ms apart: 20 s of real history for the sparklines and
   # enough samples for sustained alert levels.
   "$bin" --screenshot "$out/$name.svg" --screen "$screen" --size "$size" \
-    --samples 40 --interval 500 "$@"
+    --samples 40 --interval 500 --redact "$@"
   rsvg-convert --zoom 1.5 "$out/$name.svg" -o "$out/$name.png"
   echo "wrote $out/$name.png ($screen, $size)"
 }

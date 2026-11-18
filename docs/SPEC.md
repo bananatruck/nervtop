@@ -148,6 +148,7 @@ Unknown keys and invalid values are errors that name the key, printed before the
 | `--screenshot PATH` | Render the real UI with live data to an SVG file and exit |
 | `--size WxH` | Terminal size for `--screenshot`, default 120x40 |
 | `--screen NAME` | Screen for `--screenshot`: overview, processes, diagnostics |
+| `--redact` | With `--once` or `--screenshot`: replace the hostname, non-system user names, process names outside a list of generic programs, non-standard interface names and `/home/<name>` mount points with neutral labels, before alerts are evaluated; numbers are unchanged |
 | `--samples N` | Samples taken one interval apart before `--screenshot` renders, 1 to 600, default 4, so history and sustained alert levels are real |
 | `-h`, `--help` and `-V`, `--version` | Help and version |
 

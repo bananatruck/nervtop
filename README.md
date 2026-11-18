@@ -21,7 +21,7 @@ It ships no logos, artwork, fonts, audio or dialogue from any show.
 Download the static Linux x86_64 binary from the latest release and run it:
 
 ```sh
-mkdir -p ~/.local/bin && curl -sL https://github.com/bananatruck/nervtop/releases/download/v0.1.0/nervtop-v0.1.0-x86_64-unknown-linux-musl.tar.gz | tar xz -C ~/.local/bin --strip-components=1 nervtop-v0.1.0-x86_64-unknown-linux-musl/nervtop
+mkdir -p ~/.local/bin && curl -sL https://github.com/bananatruck/nervtop/releases/download/v0.1.1/nervtop-v0.1.1-x86_64-unknown-linux-musl.tar.gz | tar xz -C ~/.local/bin --strip-components=1 nervtop-v0.1.1-x86_64-unknown-linux-musl/nervtop
 ~/.local/bin/nervtop
 ```
 
@@ -34,7 +34,7 @@ Each release also carries a `.sha256` file for the archive.
 Rust 1.95 or newer is required.
 
 ```sh
-cargo install --locked --git https://github.com/bananatruck/nervtop --tag v0.1.0
+cargo install --locked --git https://github.com/bananatruck/nervtop --tag v0.1.1
 ```
 
 ### Arch Linux
@@ -235,14 +235,14 @@ Polling nvidia-smi on a schedule would keep the GPU awake and cost battery.
 
 ## Resource use
 
-Measured with `scripts/measure-idle.sh` on the machine nervtop was built for: an ASUS laptop with an AMD Ryzen 9 8945HS (16 logical cores), an RTX 4060 laptop GPU, about 530 processes running, and nervtop v0.1.0 built in release mode, left untouched in a 160x48 tmux terminal for 60 seconds.
+Measured with `scripts/measure-idle.sh` on the machine nervtop was built for: an ASUS laptop with an AMD Ryzen 9 8945HS (16 logical cores), an RTX 4060 laptop GPU, about 580 processes running, and nervtop v0.1.1 built in release mode, left untouched in a 160x48 tmux terminal for 60 seconds.
 
 | Interval | Average CPU | Resident memory |
 | --- | --- | --- |
-| 1000 ms (default) | 2.98% of one core | 6.1 MiB |
-| 2000 ms | 1.73% of one core | 6.2 MiB |
+| 1000 ms (default) | 2.43% of one core | 6.2 MiB |
+| 2000 ms | 1.20% of one core | 6.1 MiB |
 
-On a 16-thread machine, 2.98% of one core is about 0.2% of the whole CPU.
+On a 16-thread machine, 2.43% of one core is about 0.15% of the whole CPU.
 Most of the cost is reading `/proc` for every process (about 16 ms per sample) and the hwmon sensors (about 10 ms, mostly the Wi-Fi chip and the ASUS embedded controller's fan readings); drawing a 160x48 frame takes under half a millisecond.
 Your figure depends on the number of processes and on how slow your sensors are to read; run the script to measure it on your machine.
 
@@ -304,7 +304,7 @@ scripts/measure-idle.sh target/release/nervtop 60
 
 ## Status
 
-Version 0.1.0 is complete for its scope: every panel, screen, key, config option and alert rule described here works and is tested.
+Version 0.1.1 is complete for its scope: every panel, screen, key, config option and alert rule described here works and is tested.
 
 Known limits:
 - Linux only, because it reads `/proc` and `/sys` directly.

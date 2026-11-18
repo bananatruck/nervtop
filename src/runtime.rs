@@ -126,6 +126,16 @@ impl Drop for Restore {
         ratatui::restore();
     }
 }
+/// Ends the main loop when the input thread ends for any reason, a panic
+/// inside `crossterm::event::read` included, so the main loop never waits on
+/// input that will not come. When the main loop is already gone the send
+/// fails and that is fine.
+struct InputExit(Sender<AppEvent>);
+impl Drop for InputExit {
+    fn drop(&mut self) {
+        let _ = self.0.send(AppEvent::Quit);
+    }
+}
 struct CollectorExit(Sender<AppEvent>);
 impl Drop for CollectorExit {
     fn drop(&mut self) {
@@ -168,6 +178,7 @@ pub fn run(collector: Collector, mut app: App) -> io::Result<()> {
     });
     let input_tx = events_tx.clone();
     thread::spawn(move || {
+        let _exit = InputExit(input_tx.clone());
         loop {
             let event = match crossterm::event::read() {
                 Ok(Event::Key(k)) => AppEvent::Key(k),
@@ -378,6 +389,20 @@ mod tests {
         });
         assert!(worker.join().is_err());
         assert!(matches!(rx.recv().unwrap(), AppEvent::CollectorStopped));
+    }
+    #[test]
+    fn input_exit_sends_quit_even_during_panic() {
+        let (tx, rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let _exit = InputExit(tx);
+            panic!("test input failure");
+        });
+        assert!(worker.join().is_err());
+        assert!(matches!(rx.recv().unwrap(), AppEvent::Quit));
+        // With the main loop gone the failed send is ignored, not a panic.
+        let (tx, rx) = mpsc::channel();
+        drop(rx);
+        drop(InputExit(tx));
     }
     #[test]
     #[ignore = "requires a terminal and permission for local socket sends; run alone with --ignored --exact runtime::tests::terminal_restored_after_sigterm"]

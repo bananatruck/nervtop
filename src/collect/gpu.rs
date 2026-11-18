@@ -5,15 +5,53 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::mpsc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     time::{Duration, Instant},
 };
 
 /// External command boundary, replaceable without executing a GPU query in tests.
 pub trait CommandRunner: Send {
+    /// Shares an outstanding child cleanup with the collector, when supported.
+    fn pending_reaper(&self) -> Option<Arc<AtomicBool>> {
+        None
+    }
+
     fn run(&mut self, program: &str, args: &[&str], timeout: Duration) -> Result<String, String>;
 }
-pub struct SystemCommandRunner;
+#[derive(Default)]
+pub struct SystemCommandRunner {
+    pending: Arc<AtomicBool>,
+}
+
+const MAX_STDOUT: usize = 64 * 1024;
+
+fn read_command_output(stdout: impl Read) -> Result<String, String> {
+    let mut bytes = Vec::new();
+    stdout
+        // One extra byte distinguishes an exact-limit response from overflow.
+        .take((MAX_STDOUT + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "nvidia-smi output failed".to_owned())?;
+    if bytes.len() > MAX_STDOUT {
+        return Err("nvidia-smi output too large".into());
+    }
+    String::from_utf8(bytes).map_err(|_| "nvidia-smi output failed".into())
+}
+
+fn background_reaper(
+    pending: Arc<AtomicBool>,
+    reap: impl FnOnce() + Send + 'static,
+) -> std::thread::JoinHandle<()> {
+    pending.store(true, Ordering::SeqCst);
+    std::thread::spawn(move || {
+        reap();
+        pending.store(false, Ordering::SeqCst);
+    })
+}
 
 /// How long a killed nvidia-smi gets to be reaped before it is handed to a
 /// background reaper. A process in uninterruptible sleep ignores SIGKILL until
@@ -41,9 +79,17 @@ fn reaped_within(
 }
 
 impl CommandRunner for SystemCommandRunner {
+    fn pending_reaper(&self) -> Option<Arc<AtomicBool>> {
+        Some(self.pending.clone())
+    }
+
     fn run(&mut self, program: &str, args: &[&str], timeout: Duration) -> Result<String, String> {
+        if self.pending.load(Ordering::SeqCst) {
+            return Err("previous nvidia-smi still running".into());
+        }
         let mut child = Command::new(program)
             .args(args)
+            .env("LC_ALL", "C")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -55,58 +101,71 @@ impl CommandRunner for SystemCommandRunner {
                     "nvidia-smi spawn failed".to_owned()
                 }
             })?;
-        let mut stdout = child.stdout.take().ok_or("nvidia-smi stdout unavailable")?;
-        // Drain concurrently so even unexpectedly large output cannot fill the pipe.
-        // The text comes back over a channel so collecting it is bounded too.
+        let stdout = child.stdout.take().ok_or("nvidia-smi stdout unavailable")?;
         let (text_tx, text_rx) = mpsc::channel();
         let reader = std::thread::spawn(move || {
-            let mut text = String::new();
-            let _ = text_tx.send(stdout.read_to_string(&mut text).map(|_| text));
+            let _ = text_tx.send(read_command_output(stdout));
         });
         let start = Instant::now();
+        let mut output = None;
         let result: Result<(), String> = loop {
+            if output.is_none()
+                && let Ok(text) = text_rx.try_recv()
+            {
+                match text {
+                    Ok(text) => output = Some(text),
+                    Err(reason) => break Err(reason),
+                }
+            }
             match child.try_wait() {
                 Ok(Some(status)) => {
                     break if status.success() {
                         Ok(())
                     } else {
+                        // Closing a capped pipe can make the child exit with SIGPIPE.
+                        // Preserve the reader's error rather than hiding overflow.
+                        if output.is_none()
+                            && let Ok(Err(reason)) = text_rx.recv_timeout(
+                                (start + timeout + KILL_GRACE)
+                                    .saturating_duration_since(Instant::now()),
+                            )
+                        {
+                            break Err(reason);
+                        }
                         Err("nvidia-smi non-zero exit".into())
                     };
                 }
                 Ok(None) if start.elapsed() < timeout => {
                     std::thread::sleep(Duration::from_millis(10))
                 }
-                outcome => {
-                    let _ = child.kill();
-                    if !reaped_within(|| child.try_wait(), Instant::now, KILL_GRACE) {
-                        // Still not reaped (uninterruptible sleep): reap it in the
-                        // background so this sample is not blocked by it.
-                        std::thread::spawn(move || {
-                            let _ = child.wait();
-                            let _ = reader.join();
-                        });
-                    }
-                    break Err(if outcome.is_ok() {
-                        "nvidia-smi timeout".into()
-                    } else {
-                        "nvidia-smi wait failed".into()
-                    });
-                }
+                Ok(None) => break Err("nvidia-smi timeout".into()),
+                Err(_) => break Err("nvidia-smi wait failed".into()),
             }
         };
-        result?;
-        // The child has exited, so its stdout normally closes at once; a
-        // descendant still holding the pipe must not stall the sample either.
+        if let Err(reason) = result {
+            let _ = child.kill();
+            if !reaped_within(|| child.try_wait(), Instant::now, KILL_GRACE) {
+                background_reaper(self.pending.clone(), move || {
+                    let _ = child.wait();
+                    let _ = reader.join();
+                });
+            }
+            return Err(reason);
+        }
+        if let Some(text) = output {
+            return Ok(text);
+        }
+        // A descendant may retain stdout after the child exits.
         text_rx
             .recv_timeout((start + timeout + KILL_GRACE).saturating_duration_since(Instant::now()))
             .map_err(|_| "nvidia-smi output failed".to_owned())?
-            .map_err(|_| "nvidia-smi output failed".to_owned())
     }
 }
 
 pub struct Gpus {
     root: PathBuf,
     runner: Box<dyn CommandRunner>,
+    pending_reaper: Arc<AtomicBool>,
     names: Option<String>,
     name_cache: BTreeMap<(u16, u16), Option<String>>,
     cached: Result<BTreeMap<String, GpuStats>, String>,
@@ -114,7 +173,7 @@ pub struct Gpus {
 }
 impl Gpus {
     pub fn new(root: PathBuf) -> Self {
-        Self::with_runner(root, Box::new(SystemCommandRunner))
+        Self::with_runner(root, Box::new(SystemCommandRunner::default()))
     }
     pub fn with_runner(root: PathBuf, runner: Box<dyn CommandRunner>) -> Self {
         // Only retain the first readable database; do not probe it every tick.
@@ -123,6 +182,7 @@ impl Gpus {
             .find_map(|p| read(root.join(p)));
         Self {
             root,
+            pending_reaper: runner.pending_reaper().unwrap_or_default(),
             runner,
             names,
             name_cache: BTreeMap::new(),
@@ -131,6 +191,11 @@ impl Gpus {
         }
     }
     fn query(&mut self) {
+        if self.pending_reaper.load(Ordering::SeqCst) {
+            self.cached = Err("previous nvidia-smi still running".into());
+            self.queried_at = None;
+            return;
+        }
         if self
             .queried_at
             .is_some_and(|at| at.elapsed() < Duration::from_secs(2))
@@ -172,34 +237,58 @@ fn normalize_slot(slot: &str) -> Option<String> {
         u8::from_str_radix(function, 16).ok()?
     ))
 }
-fn csv_number(text: &str) -> Reading<f64> {
+fn valid_number(value: f64, min: f64, max: f64) -> Reading<f64> {
+    if value.is_finite() && (min..=max).contains(&value) {
+        Reading::Available(value)
+    } else {
+        Reading::unavailable("invalid value")
+    }
+}
+fn csv_number(text: &str, min: f64, max: f64) -> Reading<f64> {
     text.trim()
         .parse::<f64>()
+        .map(|v| valid_number(v, min, max))
+        .unwrap_or_else(|_| Reading::unavailable("not reported"))
+}
+fn csv_memory(text: &str) -> Reading<u64> {
+    match text
+        .trim()
+        .parse::<u64>()
         .ok()
-        .filter(|v| v.is_finite() && *v >= 0.0)
-        .map(Reading::Available)
-        .unwrap_or_else(|| Reading::unavailable("not reported"))
+        .and_then(|v| v.checked_mul(1048576))
+    {
+        Some(bytes) => Reading::Available(bytes),
+        None if text.trim().parse::<f64>().is_ok() => Reading::unavailable("invalid value"),
+        None => Reading::unavailable("not reported"),
+    }
+}
+fn sys_value(dir: &Path, file: &str, scale: f64, min: f64, max: f64) -> Reading<f64> {
+    match read(dir.join(file)) {
+        Some(text) => csv_number(&text, min * scale, max * scale).map(|v| v / scale),
+        None => Reading::unavailable(format!("{file} not reported")),
+    }
 }
 fn parse_csv(text: &str) -> BTreeMap<String, GpuStats> {
     text.lines()
         .filter_map(|line| {
             let fields: Vec<_> = line.split(',').map(str::trim).collect();
-            if fields.len() != 7 {
+            if fields.len() < 7 {
                 return None;
             }
             let slot = normalize_slot(fields[0])?;
+            let numeric = &fields[fields.len() - 5..];
             Some((
                 slot.clone(),
                 GpuStats {
                     pci_slot: slot,
                     vendor: GpuVendor::Nvidia,
-                    name: fields[1].into(),
+                    name: fields[1..fields.len() - 5].join(","),
                     power_state: GpuPower::Active,
-                    utilization_percent: csv_number(fields[2]).map(|v| v as f32),
-                    memory_used_bytes: csv_number(fields[3]).map(|v| (v * 1048576.0) as u64),
-                    memory_total_bytes: csv_number(fields[4]).map(|v| (v * 1048576.0) as u64),
-                    temperature_celsius: csv_number(fields[5]),
-                    power_watts: csv_number(fields[6]),
+                    utilization_percent: csv_number(numeric[0], 0.0, 100.0).map(|v| v as f32),
+                    memory_used_bytes: csv_memory(numeric[1]),
+                    memory_total_bytes: csv_memory(numeric[2]),
+                    temperature_celsius: csv_number(numeric[3], -50.0, 200.0),
+                    power_watts: csv_number(numeric[4], 0.0, 1000.0),
                 },
             ))
         })
@@ -239,8 +328,9 @@ fn sys_number<T: std::str::FromStr>(dir: &Path, file: &str) -> Reading<T> {
 /// "active", "unsupported" (runtime PM disabled, so always powered) or no
 /// status file at all. Anything else ("suspended", "suspending", "resuming",
 /// "error" or an unrecognized value) means nvidia-smi must not run.
-fn runtime_settled_awake(runtime: Option<&str>) -> bool {
-    matches!(runtime, None | Some("active" | "unsupported"))
+fn runtime_settled_awake(runtime: &std::io::Result<Option<String>>) -> bool {
+    matches!(runtime, Ok(None))
+        || matches!(runtime, Ok(Some(status)) if matches!(status.as_str(), "active" | "unsupported"))
 }
 impl Source for Gpus {
     type Output = Vec<GpuStats>;
@@ -258,14 +348,22 @@ impl Source for Gpus {
                         .and_then(|v| u16::from_str_radix(v.trim_start_matches("0x"), 16).ok())
                 };
                 let ids = (hex("vendor"), hex("device"));
-                let runtime = read(dir.join("power/runtime_status"));
+                let runtime = match std::fs::read_to_string(dir.join("power/runtime_status")) {
+                    Ok(status) => Ok(Some(status.trim().to_owned())),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                    Err(e) => Err(e),
+                };
                 (dir, ids, runtime)
             })
             .collect();
         let nvidia_asleep = adapters.iter().any(|(_, (vendor, _), runtime)| {
-            *vendor == Some(0x10de) && !runtime_settled_awake(runtime.as_deref())
+            *vendor == Some(0x10de) && !runtime_settled_awake(runtime)
         });
+        let nvidia_unreadable = adapters
+            .iter()
+            .any(|(_, (vendor, _), runtime)| *vendor == Some(0x10de) && runtime.is_err());
         for (dir, (vendor_id, device_id), runtime) in adapters {
+            let status = runtime.as_ref().ok().and_then(|s| s.as_deref());
             let (vendor, label) = match vendor_id {
                 Some(0x1002) => (GpuVendor::Amd, "AMD"),
                 Some(0x10de) => (GpuVendor::Nvidia, "NVIDIA"),
@@ -294,7 +392,7 @@ impl Source for Gpus {
                 .unwrap_or_default()
                 .to_string_lossy()
                 .into_owned();
-            if matches!(runtime.as_deref(), Some("suspended" | "suspending")) {
+            if matches!(status, Some("suspended" | "suspending")) {
                 out.push(unavailable(
                     slot,
                     vendor,
@@ -312,8 +410,17 @@ impl Source for Gpus {
                 "gpu metrics not supported",
             );
             match vendor {
-                GpuVendor::Nvidia if !runtime_settled_awake(runtime.as_deref()) => {
-                    let reason = match runtime.as_deref() {
+                GpuVendor::Nvidia if nvidia_unreadable => {
+                    gpu = unavailable(
+                        slot,
+                        vendor,
+                        gpu.name,
+                        GpuPower::Active,
+                        "gpu power state unreadable",
+                    );
+                }
+                GpuVendor::Nvidia if !runtime_settled_awake(&runtime) => {
+                    let reason = match status {
                         Some("resuming") => "gpu resuming",
                         Some("error") => "gpu runtime pm error",
                         _ => "gpu runtime pm status unrecognized",
@@ -358,19 +465,24 @@ impl Source for Gpus {
                     }
                 }
                 GpuVendor::Amd => {
-                    gpu.utilization_percent = sys_number(&dir, "gpu_busy_percent");
+                    gpu.utilization_percent =
+                        sys_value(&dir, "gpu_busy_percent", 1.0, 0.0, 100.0).map(|v| v as f32);
                     gpu.memory_used_bytes = sys_number(&dir, "mem_info_vram_used");
                     gpu.memory_total_bytes = sys_number(&dir, "mem_info_vram_total");
                     gpu.temperature_celsius = Reading::unavailable("gpu temperature not reported");
                     gpu.power_watts = Reading::unavailable("gpu power not reported");
                     for hwmon in entries(dir.join("hwmon")) {
-                        if let Some(v) = number::<i64>(hwmon.join("temp1_input")) {
-                            gpu.temperature_celsius = Reading::Available(v as f64 / 1000.0);
+                        if hwmon.join("temp1_input").exists() {
+                            gpu.temperature_celsius =
+                                sys_value(&hwmon, "temp1_input", 1000.0, -50.0, 200.0);
                         }
-                        if let Some(v) = number::<u64>(hwmon.join("power1_average"))
-                            .or_else(|| number(hwmon.join("power1_input")))
-                        {
-                            gpu.power_watts = Reading::Available(v as f64 / 1e6);
+                        let power_file = if hwmon.join("power1_average").exists() {
+                            "power1_average"
+                        } else {
+                            "power1_input"
+                        };
+                        if hwmon.join(power_file).exists() {
+                            gpu.power_watts = sys_value(&hwmon, power_file, 1e6, 0.0, 1000.0);
                         }
                     }
                 }
@@ -438,6 +550,299 @@ mod tests {
             ),
             calls,
         )
+    }
+    #[test]
+    fn unreadable_runtime_status_blocks_all_nvidia_queries() {
+        let t = tempfile::tempdir().unwrap();
+        device(t.path(), "0000:01:00.0", "0x10de", "0x28e0", "active");
+        device(t.path(), "0000:02:00.0", "0x10de", "0x28e0", "active");
+        std::fs::write(
+            t.path()
+                .join("sys/bus/pci/devices/0000:02:00.0/power/runtime_status"),
+            [0xff],
+        )
+        .unwrap();
+        let (mut g, calls) = source(t.path(), Ok(CSV.into()));
+        let reading = g.sample();
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        for row in reading.value().unwrap() {
+            assert_eq!(row.power_watts.reason(), Some("gpu power state unreadable"));
+        }
+    }
+    #[test]
+    fn invalid_gpu_values_are_unavailable() {
+        for value in ["NaN", "inf", "-1", "1e100", "101"] {
+            let rows = parse_csv(&format!("0000:01:00.0, GPU, {value}, 0, 0, 0, 0"));
+            assert_eq!(
+                rows["0000:01:00.0"].utilization_percent.reason(),
+                Some("invalid value"),
+                "{value}"
+            );
+            let t = tempfile::tempdir().unwrap();
+            device(t.path(), "0000:05:00.0", "0x1002", "0x15bf", "active");
+            put(
+                t.path(),
+                "sys/bus/pci/devices/0000:05:00.0/gpu_busy_percent",
+                value,
+            );
+            assert_eq!(
+                Gpus::new(t.path().into()).sample().value().unwrap()[0]
+                    .utilization_percent
+                    .reason(),
+                Some("invalid value"),
+                "{value}"
+            );
+        }
+        for value in ["NaN", "inf", "-51", "1e100", "201"] {
+            let rows = parse_csv(&format!("0000:01:00.0, GPU, 0, 0, 0, {value}, 0"));
+            assert_eq!(
+                rows["0000:01:00.0"].temperature_celsius.reason(),
+                Some("invalid value"),
+                "{value}"
+            );
+        }
+        for value in ["NaN", "inf", "-1", "1e100", "1001"] {
+            let rows = parse_csv(&format!("0000:01:00.0, GPU, 0, 0, 0, 0, {value}"));
+            assert_eq!(
+                rows["0000:01:00.0"].power_watts.reason(),
+                Some("invalid value"),
+                "{value}"
+            );
+        }
+        for value in [
+            "NaN",
+            "inf",
+            "-1",
+            "1e100",
+            "17592186044416",
+            "18446744073709551616",
+        ] {
+            let rows = parse_csv(&format!("0000:01:00.0, GPU, 0, {value}, {value}, 0, 0"));
+            let row = &rows["0000:01:00.0"];
+            assert_eq!(
+                row.memory_used_bytes.reason(),
+                Some("invalid value"),
+                "{value}"
+            );
+            assert_eq!(
+                row.memory_total_bytes.reason(),
+                Some("invalid value"),
+                "{value}"
+            );
+        }
+        let rows = parse_csv("0000:01:00.0, GPU, 100, 17592186044415, 0, -50, 1000");
+        let row = &rows["0000:01:00.0"];
+        assert_eq!(row.temperature_celsius, Reading::Available(-50.0));
+        assert_eq!(
+            row.memory_used_bytes,
+            Reading::Available(18446744073708503040)
+        );
+    }
+    #[test]
+    fn csv_names_with_commas_and_short_rows() {
+        let rows = parse_csv(
+            "0000:01:00.0, NVIDIA GPU, Special Edition, 17, 321, 8188, 48, 12.51\n0000:02:00.0, GPU, 1, 2, 3, 4",
+        );
+        assert_eq!(rows.len(), 1);
+        let row = &rows["0000:01:00.0"];
+        assert_eq!(row.name, "NVIDIA GPU,Special Edition");
+        assert_eq!(row.utilization_percent, Reading::Available(17.0));
+        assert_eq!(row.power_watts, Reading::Available(12.51));
+    }
+    #[test]
+    fn command_uses_c_locale() {
+        assert_eq!(
+            SystemCommandRunner::default()
+                .run(
+                    "/bin/sh",
+                    &["-c", "printf %s \"$LC_ALL\""],
+                    Duration::from_secs(2)
+                )
+                .unwrap(),
+            "C"
+        );
+    }
+    #[test]
+    fn pending_reaper_blocks_queries_until_it_finishes() {
+        struct DeferredRunner {
+            pending: Arc<AtomicBool>,
+            calls: Arc<AtomicUsize>,
+        }
+        impl CommandRunner for DeferredRunner {
+            fn pending_reaper(&self) -> Option<Arc<AtomicBool>> {
+                Some(self.pending.clone())
+            }
+            fn run(&mut self, _: &str, _: &[&str], _: Duration) -> Result<String, String> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                self.pending.store(true, Ordering::SeqCst);
+                Err("nvidia-smi timeout".into())
+            }
+        }
+        let t = tempfile::tempdir().unwrap();
+        device(t.path(), "0000:01:00.0", "0x10de", "0x28e0", "active");
+        let pending = Arc::new(AtomicBool::new(false));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut g = Gpus::with_runner(
+            t.path().into(),
+            Box::new(DeferredRunner {
+                pending: pending.clone(),
+                calls: calls.clone(),
+            }),
+        );
+        assert_eq!(
+            g.sample().value().unwrap()[0].power_watts.reason(),
+            Some("nvidia-smi timeout")
+        );
+        assert_eq!(
+            g.sample().value().unwrap()[0].power_watts.reason(),
+            Some("previous nvidia-smi still running")
+        );
+        g.queried_at = Some(Instant::now() - Duration::from_secs(3));
+        assert_eq!(
+            g.sample().value().unwrap()[0].power_watts.reason(),
+            Some("previous nvidia-smi still running")
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        pending.store(false, Ordering::SeqCst);
+        g.sample();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+    #[test]
+    fn oversized_command_output_is_rejected() {
+        let mut runner = SystemCommandRunner::default();
+        assert_eq!(
+            runner
+                .run(
+                    "/usr/bin/head",
+                    &["-c", "65537", "/dev/zero"],
+                    Duration::from_secs(2)
+                )
+                .err()
+                .as_deref(),
+            Some("nvidia-smi output too large")
+        );
+    }
+    #[test]
+    fn streaming_output_is_bounded() {
+        let start = Instant::now();
+        assert_eq!(
+            SystemCommandRunner::default()
+                .run("/usr/bin/yes", &[], Duration::from_secs(2))
+                .err()
+                .as_deref(),
+            Some("nvidia-smi output too large")
+        );
+        assert!(start.elapsed() < Duration::from_secs(3));
+    }
+    #[test]
+    fn reap_polling_stops_at_its_deadline() {
+        let start = Instant::now();
+        let ticks = std::cell::Cell::new(0);
+        assert!(!reaped_within(
+            || Ok(None),
+            || {
+                let tick = ticks.get();
+                ticks.set(tick + 1);
+                start + Duration::from_millis(tick * 100)
+            },
+            Duration::from_millis(200)
+        ));
+        assert_eq!(ticks.get(), 3);
+        assert!(reaped_within(
+            || Ok(Some(std::os::unix::process::ExitStatusExt::from_raw(0))),
+            Instant::now,
+            Duration::ZERO
+        ));
+    }
+    #[test]
+    fn output_reader_enforces_the_exact_limit() {
+        let output = read_command_output(std::io::repeat(b'x').take(65536)).unwrap();
+        assert_eq!(output.len(), 65536);
+        let mut bytes = std::io::repeat(b'x').take(1000000);
+        assert_eq!(
+            read_command_output(&mut bytes).err().as_deref(),
+            Some("nvidia-smi output too large")
+        );
+        assert_eq!(bytes.limit(), 934463);
+        assert_eq!(
+            read_command_output(&[0xff][..]).err().as_deref(),
+            Some("nvidia-smi output failed")
+        );
+    }
+    #[test]
+    fn background_reaper_marks_pending_until_cleanup_finishes() {
+        let pending = Arc::new(AtomicBool::new(false));
+        let (release, wait) = mpsc::channel();
+        let thread = background_reaper(pending.clone(), move || {
+            wait.recv().unwrap();
+        });
+        assert!(pending.load(Ordering::SeqCst));
+        let mut runner = SystemCommandRunner {
+            pending: pending.clone(),
+        };
+        assert_eq!(
+            runner
+                .run("/nonexistent/nvidia-smi", &[], Duration::from_secs(1))
+                .err()
+                .as_deref(),
+            Some("previous nvidia-smi still running")
+        );
+        release.send(()).unwrap();
+        thread.join().unwrap();
+        assert!(!pending.load(Ordering::SeqCst));
+        assert_eq!(
+            runner
+                .run("/nonexistent/nvidia-smi", &[], Duration::from_secs(1))
+                .err()
+                .as_deref(),
+            Some("nvidia-smi not found")
+        );
+    }
+    #[test]
+    fn amd_hwmon_values_have_physical_bounds() {
+        let t = tempfile::tempdir().unwrap();
+        device(t.path(), "0000:05:00.0", "0x1002", "0x15bf", "active");
+        let mut g = Gpus::new(t.path().into());
+        for value in ["NaN", "inf", "-51000", "1e100", "200001"] {
+            put(
+                t.path(),
+                "sys/bus/pci/devices/0000:05:00.0/hwmon/hwmon0/temp1_input",
+                value,
+            );
+            assert_eq!(
+                g.sample().value().unwrap()[0].temperature_celsius.reason(),
+                Some("invalid value"),
+                "{value}"
+            );
+        }
+        for file in ["power1_input", "power1_average"] {
+            for value in ["NaN", "inf", "-1", "1e100", "1000000001"] {
+                put(
+                    t.path(),
+                    &format!("sys/bus/pci/devices/0000:05:00.0/hwmon/hwmon0/{file}"),
+                    value,
+                );
+                assert_eq!(
+                    g.sample().value().unwrap()[0].power_watts.reason(),
+                    Some("invalid value"),
+                    "{value}"
+                );
+            }
+        }
+        put(
+            t.path(),
+            "sys/bus/pci/devices/0000:05:00.0/hwmon/hwmon0/temp1_input",
+            "-50000",
+        );
+        put(
+            t.path(),
+            "sys/bus/pci/devices/0000:05:00.0/hwmon/hwmon0/power1_average",
+            "1000000000",
+        );
+        let reading = g.sample();
+        let row = &reading.value().unwrap()[0];
+        assert_eq!(row.temperature_celsius, Reading::Available(-50.0));
+        assert_eq!(row.power_watts, Reading::Available(1000.0));
     }
     #[test]
     fn parses_nvidia_csv_per_field() {
@@ -646,7 +1051,7 @@ mod tests {
     }
     #[test]
     fn real_runner_handles_success_failure_missing_and_timeout() {
-        let mut r = SystemCommandRunner;
+        let mut r = SystemCommandRunner::default();
         assert_eq!(
             r.run("/bin/echo", &["hello"], Duration::from_secs(2))
                 .unwrap(),

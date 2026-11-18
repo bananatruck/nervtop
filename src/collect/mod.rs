@@ -54,7 +54,7 @@ impl Collector {
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
         let s = &mut self.sources;
-        Snapshot {
+        let mut snapshot = Snapshot {
             taken_at_ms,
             seq: self.seq,
             host: s.host.sample(),
@@ -66,8 +66,73 @@ impl Collector {
             sensors: s.sensors.sample(),
             gpus: s.gpus.sample(),
             battery: s.battery.sample(),
+        };
+        sanitize(&mut snapshot);
+        snapshot
+    }
+}
+
+/// Replaces control characters in one string with `?`.
+fn clean(text: &mut String) {
+    if text.chars().any(char::is_control) {
+        *text = text
+            .chars()
+            .map(|c| if c.is_control() { '?' } else { c })
+            .collect();
+    }
+}
+
+/// Removes control characters from every name in a snapshot. Process names
+/// in particular are set by any unprivileged program, and an escape sequence
+/// or newline in one must not reach a terminal through `--once` or forge a
+/// row in a report.
+fn sanitize(s: &mut Snapshot) {
+    fn each<T>(r: &mut Reading<T>, f: impl FnOnce(&mut T)) {
+        if let Reading::Available(v) = r {
+            f(v);
         }
     }
+    each(&mut s.host.hostname, clean);
+    each(&mut s.host.kernel, clean);
+    each(&mut s.cpu, |c| {
+        if let Some(b) = &mut c.brand {
+            clean(b);
+        }
+    });
+    each(&mut s.disks, |ds| {
+        for d in ds {
+            clean(&mut d.mount_point);
+            clean(&mut d.device);
+            clean(&mut d.file_system);
+        }
+    });
+    each(&mut s.network, |ns| {
+        ns.iter_mut().for_each(|n| clean(&mut n.name))
+    });
+    each(&mut s.processes, |ps| {
+        for p in ps {
+            clean(&mut p.name);
+            clean(&mut p.user);
+            clean(&mut p.state);
+        }
+    });
+    each(&mut s.sensors, |ss| {
+        for t in &mut ss.temps {
+            clean(&mut t.chip);
+            clean(&mut t.label);
+        }
+        for f in &mut ss.fans {
+            clean(&mut f.chip);
+            clean(&mut f.label);
+        }
+    });
+    each(&mut s.gpus, |gs| {
+        for g in gs {
+            clean(&mut g.name);
+            clean(&mut g.pci_slot);
+        }
+    });
+    each(&mut s.battery, |b| clean(&mut b.name));
 }
 
 pub mod battery;
@@ -169,6 +234,27 @@ impl Rates {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn control_characters_never_reach_any_output() {
+        let mut snap = fake::sample_snapshot();
+        if let Reading::Available(ps) = &mut snap.processes {
+            ps[0].name = "\u{1b}[2Jowned".into();
+        }
+        if let Reading::Available(s) = &mut snap.sensors {
+            s.temps[0].label = "fake\nCPU TEMP 20.0".into();
+        }
+        snap.host.hostname = Reading::Available("host\u{7}".into());
+        let mut c = Collector::new(fake::sources_with(snap));
+        let out = c.sample();
+        assert_eq!(out.processes.value().unwrap()[0].name, "?[2Jowned");
+        assert_eq!(
+            out.sensors.value().unwrap().temps[0].label,
+            "fake?CPU TEMP 20.0"
+        );
+        assert_eq!(out.host.hostname, Reading::Available("host?".into()));
+        let json = serde_json::to_string(&out).unwrap();
+        assert!(!json.contains("\\u001b") && !json.contains("\\n"), "{json}");
+    }
     #[test]
     fn counter_rates() {
         assert_eq!(rate(Some(10), 30, 2.0), Reading::Available(10.0));

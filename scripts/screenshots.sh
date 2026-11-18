@@ -9,7 +9,7 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
-bin="${1:-$root/target/debug/nervtop}"
+bin="${1:-$root/target/release/nervtop}"
 out="$root/docs/screenshots"
 mkdir -p "$out"
 
@@ -18,7 +18,10 @@ command -v rsvg-convert >/dev/null || { echo "rsvg-convert (librsvg) is required
 
 shot() {
   local name="$1" screen="$2" size="$3"; shift 3
-  "$bin" --screenshot "$out/$name.svg" --screen "$screen" --size "$size" "$@"
+  # 40 samples 500 ms apart: 20 s of real history for the sparklines and
+  # enough samples for sustained alert levels.
+  "$bin" --screenshot "$out/$name.svg" --screen "$screen" --size "$size" \
+    --samples 40 --interval 500 "$@"
   rsvg-convert --zoom 1.5 "$out/$name.svg" -o "$out/$name.png"
   echo "wrote $out/$name.png ($screen, $size)"
 }

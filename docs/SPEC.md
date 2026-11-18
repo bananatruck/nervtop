@@ -61,7 +61,7 @@ Below 80 columns or 24 rows nervtop draws a single centered message that states 
 | `t` | Cycle built-in themes for this session |
 | `s` | Cycle the process sort key: CPU, memory, PID, name |
 | `r` | Reverse the sort order |
-| `/` | Start a process name filter; `Enter` keeps it, `Esc` clears it |
+| `/` | Start a process name filter; `Enter` keeps it, `Esc` clears it (also after it was kept) |
 | `j`, `k`, arrows | Move the process selection |
 | `PgUp`, `PgDn`, `g`, `G` | Page, top and bottom of the process list |
 | `a` | Acknowledge current alerts, which stops the banner from flashing until a new alert fires |
@@ -141,13 +141,14 @@ Unknown keys and invalid values are errors that name the key, printed before the
 | --- | --- |
 | `--config PATH` | Read this config file |
 | `--interval MS` | Sample interval in milliseconds, 250 to 10000 |
-| `--theme NAME` | Start with this theme |
+| `--theme NAME` | Start with this theme; colour overrides from the config file apply only to the theme they were written for |
 | `--print-config` | Print the documented default config and exit |
-| `--once` | Take two samples one interval apart, print a plain text report, and exit |
+| `--once` | Take a warm-up sample, then sample again after one interval, print a plain text report with instantaneous alert levels (sustain 1, since a single report has no history), and exit |
 | `--json` | With `--once`, print the report as JSON |
 | `--screenshot PATH` | Render the real UI with live data to an SVG file and exit |
 | `--size WxH` | Terminal size for `--screenshot`, default 120x40 |
 | `--screen NAME` | Screen for `--screenshot`: overview, processes, diagnostics |
+| `--samples N` | Samples taken one interval apart before `--screenshot` renders, 1 to 600, default 4, so history and sustained alert levels are real |
 | `-h`, `--help` and `-V`, `--version` | Help and version |
 
 ## Architecture

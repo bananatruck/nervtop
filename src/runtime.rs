@@ -62,46 +62,59 @@ enum Control {
     Quit,
 }
 
+/// Gap between a baseline sample and the first published one, at start and
+/// after a resume, so rate counters cover a short fresh window.
+const BASELINE: Duration = Duration::from_millis(250);
+
 fn collect_loop(
     mut collector: Collector,
     mut interval: u64,
     controls: Receiver<Control>,
     events: Sender<AppEvent>,
 ) {
+    // The first sample only sets the counter baselines (CPU, disk, network
+    // rates) and is not published.
     collector.sample();
-    let warm_until = Instant::now() + Duration::from_millis(250);
-    let mut warming = true;
-    let mut delay = Duration::from_millis(250);
+    let mut next = Instant::now() + BASELINE;
+    // True while waiting to publish the first sample after a baseline; an
+    // interval change then must not push that sample out.
+    let mut after_baseline = true;
     let mut paused = false;
     loop {
         let control = if paused {
+            // Paused blocks without polling.
             controls.recv().map_err(|_| RecvTimeoutError::Disconnected)
         } else {
-            controls.recv_timeout(if warming {
-                warm_until.saturating_duration_since(Instant::now())
-            } else {
-                delay
-            })
+            controls.recv_timeout(next.saturating_duration_since(Instant::now()))
         };
         match control {
             Ok(Control::Quit) | Err(RecvTimeoutError::Disconnected) => break,
             Ok(Control::Interval(ms)) => {
                 interval = ms;
-                delay = Duration::ZERO;
+                if !after_baseline {
+                    next = Instant::now() + Duration::from_millis(interval);
+                }
             }
-            Ok(Control::Pause(p)) => {
-                paused = p;
-                delay = Duration::ZERO;
+            Ok(Control::Pause(true)) => paused = true,
+            Ok(Control::Pause(false)) => {
+                if paused {
+                    paused = false;
+                    // Refresh the baselines so the next rates do not average
+                    // over the whole paused gap.
+                    collector.sample();
+                    next = Instant::now() + BASELINE;
+                    after_baseline = true;
+                }
             }
             Err(RecvTimeoutError::Timeout) => {
-                warming = false;
                 if events
                     .send(AppEvent::Snapshot(Box::new(collector.sample())))
                     .is_err()
                 {
                     break;
                 }
-                delay = Duration::from_millis(interval);
+                after_baseline = false;
+                next = Instant::now() + Duration::from_millis(interval);
             }
         }
     }
@@ -260,6 +273,12 @@ mod tests {
     }
     #[test]
     fn collector_warms_pauses_resumes_and_changes_interval() {
+        // Every collector.sample() bumps seq, so seq counts samples taken,
+        // published or not.
+        let seq = |event: AppEvent| match event {
+            AppEvent::Snapshot(s) => s.seq,
+            other => panic!("expected a snapshot, got {other:?}"),
+        };
         let (tx, rx) = mpsc::channel();
         let (events, received) = mpsc::channel();
         let started = Instant::now();
@@ -268,16 +287,44 @@ mod tests {
         tx.send(Control::Interval(10000)).unwrap();
         let first = received.recv_timeout(Duration::from_secs(5)).unwrap();
         assert!(started.elapsed() >= Duration::from_millis(250));
-        assert!(matches!(first,AppEvent::Snapshot(s) if s.seq==2));
+        assert_eq!(seq(first), 2);
+        // An interval change publishes nothing at once; the next sample comes
+        // one full new interval later.
+        let changed = Instant::now();
+        tx.send(Control::Interval(400)).unwrap();
+        assert!(matches!(
+            received.recv_timeout(Duration::from_millis(300)),
+            Err(RecvTimeoutError::Timeout)
+        ));
+        assert_eq!(
+            seq(received.recv_timeout(Duration::from_secs(5)).unwrap()),
+            3
+        );
+        assert!(changed.elapsed() >= Duration::from_millis(400));
+        // Paused: nothing is sampled, whatever the interval does.
         tx.send(Control::Pause(true)).unwrap();
         tx.send(Control::Interval(250)).unwrap();
         assert!(matches!(
             received.recv_timeout(Duration::from_millis(350)),
             Err(RecvTimeoutError::Timeout)
         ));
+        // Resume: one sample refreshes the counter baselines and is dropped,
+        // and exactly one snapshot is published 250 ms later.
+        let resumed = Instant::now();
         tx.send(Control::Pause(false)).unwrap();
-        assert!(
-            matches!(received.recv_timeout(Duration::from_secs(5)).unwrap(),AppEvent::Snapshot(s) if s.seq==3)
+        assert_eq!(
+            seq(received.recv_timeout(Duration::from_secs(5)).unwrap()),
+            5
+        );
+        assert!(resumed.elapsed() >= Duration::from_millis(250));
+        assert!(matches!(
+            received.recv_timeout(Duration::from_millis(150)),
+            Err(RecvTimeoutError::Timeout)
+        ));
+        // Then sampling continues at the interval.
+        assert_eq!(
+            seq(received.recv_timeout(Duration::from_secs(5)).unwrap()),
+            6
         );
         tx.send(Control::Quit).unwrap();
         worker.join().unwrap();

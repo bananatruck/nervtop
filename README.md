@@ -22,9 +22,10 @@ Download the static Linux x86_64 binary from the latest release and run it:
 
 ```sh
 mkdir -p ~/.local/bin && curl -sL https://github.com/bananatruck/nervtop/releases/download/v0.1.0/nervtop-v0.1.0-x86_64-unknown-linux-musl.tar.gz | tar xz -C ~/.local/bin --strip-components=1 nervtop-v0.1.0-x86_64-unknown-linux-musl/nervtop
-nervtop
+~/.local/bin/nervtop
 ```
 
+If `~/.local/bin` is on your `PATH` (most desktop distributions add it), plain `nervtop` works from then on.
 The binary is statically linked, so it runs on any x86_64 Linux distribution.
 Each release also carries a `.sha256` file for the archive.
 
@@ -60,7 +61,7 @@ A terminal with 24-bit colour shows the default theme as designed; the `ansi` th
 | --- | --- | --- |
 | `1` | OVERVIEW | Header, consensus strip, alert banner, and the CPU, MEMORY, GPU, THERMAL, STORAGE, NETWORK, POWER, PROCESSES and ALERTS panels |
 | `2` | PROCESSES | A full process table you can sort, filter and scroll |
-| `3` | DIAGNOSTICS | Every sensor and fan, every GPU field, the full battery record, every disk and interface, the alert rule table and the alert log |
+| `3` | DIAGNOSTICS | Sensors and fans, GPU fields, the full battery record, disks and interfaces, the alert rule table and the alert log, as many rows as the terminal fits (`nervtop --once` lists everything) |
 
 The layout adapts to the terminal.
 At 80x24 it keeps every panel and shows all cores as a one-line strip; larger terminals add history sparklines and more rows.
@@ -205,7 +206,9 @@ Use --print-config to see all configuration keys and defaults.
 
 `nervtop --once` prints a plain text report of every reading (the 15 busiest processes rather than the full list), every rule and the consensus, which is handy over SSH or in a script.
 `nervtop --once --json` prints the full snapshot, every rule and the consensus as JSON for other tools and agents.
-Add `--redact` to `--once` or `--screenshot` before sharing the output: it masks the hostname, user names other than system accounts, process names outside a short list of generic programs, network interface names other than `lo`, `ethN`, `wlanN` and predictable `en*` or `wl*` names, and `/home/<name>` mount points, and leaves every number unchanged.
+Add `--redact` to `--once` or `--screenshot` before sharing the output: it masks the hostname, user names other than system service accounts, process names outside a short list of generic programs, network interface names other than `lo`, `ethN`, `wlanN` and bus-position names such as `enp3s0` (MAC-based names such as `enx001122aabbcc` are masked), and every mount point outside a standard set (`/`, `/boot`, `/home`, `/var` and similar), which become `/mnt/disk-1`, `/mnt/disk-2` and so on; every number is unchanged.
+It keeps hardware and driver names, which identify a machine model rather than a person: the kernel release, CPU and GPU models, sensor chip and label names, block device names and the battery name, as well as kernel thread names.
+Control characters in any collected name are always replaced with `?`, with or without `--redact`, so a process name cannot inject terminal escape sequences into a report.
 A one-shot report has no history, so its alert levels are instantaneous (sustain 1).
 
 ## Where the numbers come from

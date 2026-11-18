@@ -3,7 +3,9 @@
 //! `ui` reads an `&App` and draws it. Key handling and snapshot application
 //! live here so they can be tested without a terminal.
 
-use crate::alert::{Agreement, AlertEvent, CellId, CellVote, Consensus, Level, RuleStatus};
+use crate::alert::{
+    Agreement, AlertEngine, AlertEvent, CellId, CellVote, Consensus, Level, RuleStatus,
+};
 use crate::config::Config;
 use crate::model::{ProcessInfo, Snapshot};
 use crate::theme::{Palette, ThemeName};
@@ -163,6 +165,8 @@ pub struct History {
 
 #[derive(Debug, Clone)]
 pub struct App {
+    pub engine: AlertEngine,
+    pub page_size: usize,
     pub config: Config,
     pub theme: ThemeName,
     pub palette: Palette,
@@ -188,6 +192,8 @@ impl App {
     /// already validated by `Config::validate`.
     pub fn new(config: Config, palette: Palette) -> App {
         App {
+            engine: AlertEngine::default(),
+            page_size: 20,
             theme: config.theme.name,
             interval_ms: config.general.interval_ms,
             palette,
@@ -255,6 +261,255 @@ impl Consensus {
             verdict: Level::Unknown,
             agreement: Agreement::Unanimous,
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Effect {
+    None,
+    Redraw,
+    Quit,
+    IntervalChanged(u64),
+    PauseChanged(bool),
+}
+
+impl App {
+    pub fn apply_snapshot(&mut self, s: Snapshot) {
+        let old_index = self.selected_index();
+        let eval = self.engine.evaluate(&s, &self.config.alerts);
+        if eval
+            .events
+            .iter()
+            .any(|e| e.to >= Level::Caution && e.to > e.from)
+        {
+            self.acknowledged = false;
+        }
+        self.rules = eval.rules;
+        self.consensus = eval.consensus;
+        self.log.extend(eval.events);
+        while self.log.len() > LOG_LEN {
+            self.log.pop_front();
+        }
+        if let Some(c) = s.cpu.value() {
+            self.history.cpu_total.push(c.total as f64);
+        }
+        if let Some(v) = s.memory.value().and_then(|m| m.used_percent()) {
+            self.history.memory_percent.push(v);
+        }
+        if let Some(nets) = s.network.value() {
+            push_sum(
+                &mut self.history.net_rx_bps,
+                nets.iter().filter_map(|n| n.rx_bps.value().copied()),
+            );
+            push_sum(
+                &mut self.history.net_tx_bps,
+                nets.iter().filter_map(|n| n.tx_bps.value().copied()),
+            );
+        }
+        if let Some(disks) = s.disks.value() {
+            push_sum(
+                &mut self.history.disk_read_bps,
+                disks.iter().filter_map(|d| d.read_bps.value().copied()),
+            );
+            push_sum(
+                &mut self.history.disk_write_bps,
+                disks.iter().filter_map(|d| d.write_bps.value().copied()),
+            );
+        }
+        if let Some(gpus) = s.gpus.value() {
+            self.history
+                .gpu_util
+                .retain(|slot, _| gpus.iter().any(|g| &g.pci_slot == slot));
+            for g in gpus {
+                if let Some(v) = g.utilization_percent.value() {
+                    self.history
+                        .gpu_util
+                        .entry(g.pci_slot.clone())
+                        .or_default()
+                        .push(*v as f64);
+                }
+            }
+        }
+        self.snapshot = Some(s);
+        self.clamp_selection(old_index);
+    }
+
+    /// Updates the process viewport after a terminal resize.
+    pub fn set_page_size(&mut self, rows: usize) {
+        self.page_size = rows.max(1);
+        self.clamp_selection(self.selected_index());
+    }
+
+    fn selected_index(&self) -> usize {
+        self.visible_processes()
+            .iter()
+            .position(|p| Some(p.pid) == self.procs.selected_pid)
+            .unwrap_or(0)
+    }
+
+    fn clamp_selection(&mut self, fallback: usize) {
+        let list = self.visible_processes();
+        let len = list.len();
+        let index = list
+            .iter()
+            .position(|p| Some(p.pid) == self.procs.selected_pid)
+            .unwrap_or(fallback.min(len.saturating_sub(1)));
+        self.procs.selected_pid = list.get(index).map(|p| p.pid);
+        self.procs.offset = self
+            .procs
+            .offset
+            .min(len.saturating_sub(self.page_size.max(1)));
+        if index < self.procs.offset {
+            self.procs.offset = index;
+        }
+        if index >= self.procs.offset + self.page_size.max(1) {
+            self.procs.offset = index + 1 - self.page_size.max(1);
+        }
+    }
+
+    pub fn handle_key(&mut self, key: crossterm::event::KeyEvent) -> Effect {
+        let before = (
+            self.screen,
+            self.show_help,
+            self.procs.clone(),
+            self.acknowledged,
+            self.theme,
+        );
+        let effect = self.dispatch_key(key);
+        let after = (
+            self.screen,
+            self.show_help,
+            self.procs.clone(),
+            self.acknowledged,
+            self.theme,
+        );
+        if effect == Effect::Redraw && before == after {
+            return Effect::None;
+        }
+        effect
+    }
+
+    fn dispatch_key(&mut self, key: crossterm::event::KeyEvent) -> Effect {
+        use crossterm::event::{KeyCode as K, KeyEventKind, KeyModifiers};
+        if key.kind == KeyEventKind::Release {
+            return Effect::None;
+        }
+        if self.show_help {
+            self.show_help = false;
+            return Effect::Redraw;
+        }
+        if key.code == K::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.should_quit = true;
+            return Effect::Quit;
+        }
+        if self.procs.mode == InputMode::Filter {
+            match key.code {
+                K::Esc => {
+                    self.procs.filter.clear();
+                    self.procs.mode = InputMode::Normal;
+                }
+                K::Enter => self.procs.mode = InputMode::Normal,
+                K::Backspace => {
+                    self.procs.filter.pop();
+                }
+                K::Char(c)
+                    if !c.is_control()
+                        && !key
+                            .modifiers
+                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                {
+                    self.procs.filter.push(c)
+                }
+                _ => return Effect::None,
+            }
+            self.clamp_selection(0);
+            return Effect::Redraw;
+        }
+        match key.code {
+            K::Char('q') => {
+                self.should_quit = true;
+                return Effect::Quit;
+            }
+            K::Char('?') | K::F(1) => self.show_help = true,
+            K::Char('1') => self.screen = Screen::Overview,
+            K::Char('2') => self.screen = Screen::Processes,
+            K::Char('3') => self.screen = Screen::Diagnostics,
+            K::Tab | K::BackTab => {
+                let i = Screen::ALL
+                    .iter()
+                    .position(|s| *s == self.screen)
+                    .unwrap_or(0);
+                let back = key.code == K::BackTab || key.modifiers.contains(KeyModifiers::SHIFT);
+                self.screen = Screen::ALL[(i + if back { 2 } else { 1 }) % 3];
+            }
+            K::Char(' ') => {
+                self.paused = !self.paused;
+                return Effect::PauseChanged(self.paused);
+            }
+            K::Char(c @ ('+' | '-')) => {
+                let ladder = [250, 500, 1000, 2000, 5000, 10000];
+                let next = if c == '+' {
+                    ladder
+                        .into_iter()
+                        .find(|v| *v > self.interval_ms)
+                        .unwrap_or(10000)
+                } else {
+                    ladder
+                        .into_iter()
+                        .rev()
+                        .find(|v| *v < self.interval_ms)
+                        .unwrap_or(250)
+                };
+                if next == self.interval_ms {
+                    return Effect::None;
+                }
+                self.interval_ms = next;
+                return Effect::IntervalChanged(next);
+            }
+            K::Char('t') => {
+                self.theme = self.theme.next();
+                self.palette = if self.theme == self.config.theme.name {
+                    crate::config::palette_for(self.theme, &self.config.theme.colors)
+                        .expect("validated theme overrides")
+                } else {
+                    Palette::builtin(self.theme)
+                };
+            }
+            K::Char('s') => {
+                self.procs.sort = self.procs.sort.next();
+                self.procs.descending = self.procs.sort.default_descending();
+                self.clamp_selection(0);
+            }
+            K::Char('r') => {
+                self.procs.descending = !self.procs.descending;
+                self.clamp_selection(0);
+            }
+            K::Char('/') => self.procs.mode = InputMode::Filter,
+            K::Char('a') => self.acknowledged = true,
+            K::Char('j' | 'k' | 'g' | 'G') | K::Down | K::Up | K::PageDown | K::PageUp => {
+                let len = self.visible_processes().len();
+                let i = self.selected_index();
+                let index = match key.code {
+                    K::Char('j') | K::Down => i.saturating_add(1),
+                    K::Char('k') | K::Up => i.saturating_sub(1),
+                    K::PageDown => i.saturating_add(self.page_size.max(1)),
+                    K::PageUp => i.saturating_sub(self.page_size.max(1)),
+                    K::Char('g') => 0,
+                    _ => len.saturating_sub(1),
+                }
+                .min(len.saturating_sub(1));
+                self.procs.selected_pid = self.visible_processes().get(index).map(|p| p.pid);
+                self.clamp_selection(index);
+            }
+            _ => return Effect::None,
+        }
+        Effect::Redraw
+    }
+}
+
+fn push_sum(series: &mut Series, values: impl Iterator<Item = f64>) {
+    if let Some(sum) = values.reduce(|a, b| a + b) {
+        series.push(sum);
     }
 }
 

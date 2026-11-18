@@ -4,10 +4,14 @@
 
 pub mod alert;
 pub mod app;
+pub mod cli;
 pub mod clock;
 pub mod collect;
 pub mod config;
+pub mod format;
 pub mod model;
+pub mod report;
+pub mod runtime;
 pub mod svg;
 pub mod theme;
 pub mod ui;

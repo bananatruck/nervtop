@@ -993,10 +993,16 @@ fn full_report_nested_fields() {
     s.battery = Reading::Available(battery(10., BatteryStatus::Discharging));
     let e = AlertEngine::default().evaluate(&s, &instant());
     let out = report::text(&s, &e);
-    assert!(out.contains("memory used: unavailable (memory missing)"));
-    assert!(out.contains("power: unavailable (power missing)"));
-    assert!(out.contains("time remaining: unavailable (no rate)"));
-    assert!(out.contains("health: unavailable (no design)"));
+    let line = |key: &str| {
+        out.lines()
+            .find(|l| l.trim_start().starts_with(key))
+            .unwrap_or_else(|| panic!("no {key} line in:\n{out}"))
+            .to_owned()
+    };
+    assert!(line("memory used").ends_with("unavailable (memory missing)"));
+    assert!(line("power").ends_with("unavailable (power missing)"));
+    assert!(line("time remaining").ends_with("unavailable (no rate)"));
+    assert!(line("health").ends_with("unavailable (no design)"));
 }
 #[test]
 fn ineffective_keys_do_not_redraw() {

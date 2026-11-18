@@ -254,12 +254,13 @@ pub fn text(s: &Snapshot, eval: &Evaluation) -> String {
                 );
                 field(
                     &mut out,
-                    "  memory",
-                    format!(
-                        "{} used of {}",
-                        reading(&g.memory_used_bytes, |v| fmt_bytes(*v)),
-                        reading(&g.memory_total_bytes, |v| fmt_bytes(*v))
-                    ),
+                    "  memory used",
+                    reading(&g.memory_used_bytes, |v| fmt_bytes(*v)),
+                );
+                field(
+                    &mut out,
+                    "  memory total",
+                    reading(&g.memory_total_bytes, |v| fmt_bytes(*v)),
                 );
                 field(
                     &mut out,

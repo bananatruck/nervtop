@@ -46,6 +46,7 @@ pub fn buffer_to_svg(buffer: &Buffer, palette: &Palette) -> String {
         let hidden = hidden_columns(line);
 
         emit_background_runs(&mut out, line, &hidden, row, y, &page_bg, palette);
+        emit_block_runs(&mut out, line, &hidden, y, palette, &page_bg);
         emit_text_runs(&mut out, line, &hidden, row, y, palette, &page_bg);
     }
 
@@ -133,6 +134,188 @@ fn text_style_key(cell: &ratatui::buffer::Cell) -> TextStyleKey {
     }
 }
 
+/// Block fill geometry within one cell box (origin at cell top-left).
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum BlockShape {
+    Full,
+    UpperHalf,
+    LowerHalf,
+    LowerEighth(u8),
+    LeftEighth(u8),
+    RightHalf,
+    TopEighth,
+    RightEighth,
+    Shade(u8),
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct BlockRunKey {
+    fill: String,
+    opacity: String,
+    shape: BlockShape,
+}
+
+fn block_char_shape(ch: char) -> Option<BlockShape> {
+    match ch {
+        '█' => Some(BlockShape::Full),
+        '▀' => Some(BlockShape::UpperHalf),
+        '▄' => Some(BlockShape::LowerHalf),
+        '▁' => Some(BlockShape::LowerEighth(1)),
+        '▂' => Some(BlockShape::LowerEighth(2)),
+        '▃' => Some(BlockShape::LowerEighth(3)),
+        '▅' => Some(BlockShape::LowerEighth(5)),
+        '▆' => Some(BlockShape::LowerEighth(6)),
+        '▇' => Some(BlockShape::LowerEighth(7)),
+        '▏' => Some(BlockShape::LeftEighth(1)),
+        '▎' => Some(BlockShape::LeftEighth(2)),
+        '▍' => Some(BlockShape::LeftEighth(3)),
+        '▌' => Some(BlockShape::LeftEighth(4)),
+        '▋' => Some(BlockShape::LeftEighth(5)),
+        '▊' => Some(BlockShape::LeftEighth(6)),
+        '▉' => Some(BlockShape::LeftEighth(7)),
+        '▐' => Some(BlockShape::RightHalf),
+        '▔' => Some(BlockShape::TopEighth),
+        '▕' => Some(BlockShape::RightEighth),
+        '░' => Some(BlockShape::Shade(25)),
+        '▒' => Some(BlockShape::Shade(50)),
+        '▓' => Some(BlockShape::Shade(75)),
+        _ => None,
+    }
+}
+
+fn is_block_cell(cell: &ratatui::buffer::Cell) -> bool {
+    let sym = cell.symbol();
+    let mut chars = sym.chars();
+    let Some(ch) = chars.next() else {
+        return false;
+    };
+    if chars.next().is_some() {
+        return false;
+    }
+    block_char_shape(ch).is_some()
+}
+
+fn block_geometry(shape: BlockShape, cell_x: f64, cell_y: f64) -> (f64, f64, f64, f64) {
+    let w = CELL_WIDTH;
+    let h = LINE_HEIGHT;
+    match shape {
+        BlockShape::Full | BlockShape::Shade(_) => (cell_x, cell_y, w, h),
+        BlockShape::UpperHalf => (cell_x, cell_y, w, h / 2.0),
+        BlockShape::LowerHalf => (cell_x, cell_y + h / 2.0, w, h / 2.0),
+        BlockShape::LowerEighth(n) => {
+            let fh = h * f64::from(n) / 8.0;
+            (cell_x, cell_y + h - fh, w, fh)
+        }
+        BlockShape::LeftEighth(n) => {
+            let fw = w * f64::from(n) / 8.0;
+            (cell_x, cell_y, fw, h)
+        }
+        BlockShape::RightHalf => (cell_x + w / 2.0, cell_y, w / 2.0, h),
+        BlockShape::TopEighth => (cell_x, cell_y, w, h / 8.0),
+        BlockShape::RightEighth => {
+            let fw = w / 8.0;
+            (cell_x + w - fw, cell_y, fw, h)
+        }
+    }
+}
+
+fn block_run_key(
+    cell: &ratatui::buffer::Cell,
+    palette: &Palette,
+    page_bg: &str,
+) -> Option<BlockRunKey> {
+    let ch = cell.symbol().chars().next()?;
+    let shape = block_char_shape(ch)?;
+    let (fill, dim_opacity, _) = text_attributes(cell, palette, page_bg);
+    let opacity = match shape {
+        BlockShape::Shade(25) => r#" opacity="0.25""#.to_string(),
+        BlockShape::Shade(50) => r#" opacity="0.5""#.to_string(),
+        BlockShape::Shade(75) => r#" opacity="0.75""#.to_string(),
+        BlockShape::Shade(_) => String::new(),
+        _ if !dim_opacity.is_empty() => dim_opacity,
+        _ => String::new(),
+    };
+    Some(BlockRunKey {
+        fill,
+        opacity,
+        shape,
+    })
+}
+
+fn emit_block_runs(
+    out: &mut String,
+    line: &[ratatui::buffer::Cell],
+    hidden: &[bool],
+    row_y: f64,
+    palette: &Palette,
+    page_bg: &str,
+) {
+    let width = line.len();
+    let mut x = 0;
+    while x < width {
+        if hidden[x] {
+            x += 1;
+            continue;
+        }
+        let cell = &line[x];
+        if matches!(cell.diff_option, CellDiffOption::Skip) {
+            x += 1;
+            continue;
+        }
+        if !is_block_cell(cell) {
+            x += 1;
+            continue;
+        }
+        let key = block_run_key(cell, palette, page_bg).expect("block cell has run key");
+        let start = x;
+        x += 1;
+        while x < width
+            && !hidden[x]
+            && !matches!(line[x].diff_option, CellDiffOption::Skip)
+            && is_block_cell(&line[x])
+        {
+            let next_key =
+                block_run_key(&line[x], palette, page_bg).expect("block cell has run key");
+            if next_key != key {
+                break;
+            }
+            x += 1;
+        }
+        let run_len = x - start;
+        let cell_x = PADDING + start as f64 * CELL_WIDTH;
+        // Only shapes that span the full cell width tile into one rectangle;
+        // left, right and half-width blocks keep a gap in every cell.
+        let merge_run = matches!(
+            key.shape,
+            BlockShape::Full
+                | BlockShape::UpperHalf
+                | BlockShape::LowerHalf
+                | BlockShape::Shade(_)
+                | BlockShape::TopEighth
+                | BlockShape::LowerEighth(_)
+        );
+        if merge_run && run_len > 1 {
+            let (rx, ry, _, rh) = block_geometry(key.shape, cell_x, row_y);
+            let rw = run_len as f64 * CELL_WIDTH;
+            let _ = writeln!(
+                out,
+                r#"<rect x="{rx:.1}" y="{ry:.1}" width="{rw:.1}" height="{rh:.1}" fill="{}"{} />"#,
+                key.fill, key.opacity
+            );
+        } else {
+            for col in start..x {
+                let cx = PADDING + col as f64 * CELL_WIDTH;
+                let (rx, ry, rw, rh) = block_geometry(key.shape, cx, row_y);
+                let _ = writeln!(
+                    out,
+                    r#"<rect x="{rx:.1}" y="{ry:.1}" width="{rw:.1}" height="{rh:.1}" fill="{}"{} />"#,
+                    key.fill, key.opacity
+                );
+            }
+        }
+    }
+}
+
 fn emit_text_runs(
     out: &mut String,
     line: &[ratatui::buffer::Cell],
@@ -155,7 +338,7 @@ fn emit_text_runs(
             continue;
         }
         let key = text_style_key(cell);
-        if cell.symbol().chars().all(|ch| ch == ' ') {
+        if cell.symbol().chars().all(|ch| ch == ' ') || is_block_cell(cell) {
             x += advance_columns(cell);
             continue;
         }
@@ -173,7 +356,7 @@ fn emit_text_runs(
                 break;
             }
             let sym = c.symbol();
-            if sym.chars().all(|ch| ch == ' ') {
+            if sym.chars().all(|ch| ch == ' ') || is_block_cell(c) {
                 break;
             }
             let w = c.cell_width();
@@ -455,5 +638,107 @@ mod tests {
         buf.set_string(0, 0, "ab", Style::default());
         let p = nerv_palette();
         assert_eq!(buffer_to_svg(&buf, &p), buffer_to_svg(&buf, &p));
+    }
+
+    #[test]
+    fn left_partial_blocks_keep_their_gaps() {
+        let mut buf = empty_buf(3, 1);
+        for x in 0..3 {
+            buf[(x, 0)].set_symbol("▌").set_fg(Color::Green);
+        }
+        let svg = buffer_to_svg(&buf, &nerv_palette());
+        let half = CELL_WIDTH / 2.0;
+        assert_eq!(
+            svg.matches(&format!(r#"width="{half:.1}""#)).count(),
+            3,
+            "{svg}"
+        );
+        assert!(!svg.contains(&format!(r#"width="{:.1}""#, CELL_WIDTH * 3.0)));
+    }
+
+    #[test]
+    fn full_block_is_rect_not_text() {
+        let mut buf = empty_buf(1, 1);
+        buf[(0, 0)].set_symbol("█").set_fg(Color::Green);
+        let svg = buffer_to_svg(&buf, &nerv_palette());
+        let y = PADDING;
+        assert!(svg.contains(&format!(
+            r#"<rect x="{:.1}" y="{y:.1}" width="{CELL_WIDTH:.1}" height="{LINE_HEIGHT:.1}""#,
+            PADDING
+        )));
+        assert!(!svg.contains('█'));
+        assert!(!svg.contains("<text"));
+    }
+
+    #[test]
+    fn lower_half_and_lower_eighth_heights() {
+        let mut buf = empty_buf(2, 1);
+        buf[(0, 0)].set_symbol("▄").set_fg(Color::Red);
+        buf[(1, 0)].set_symbol("▁").set_fg(Color::Red);
+        let svg = buffer_to_svg(&buf, &nerv_palette());
+        let y_half = PADDING + LINE_HEIGHT / 2.0;
+        let h_half = LINE_HEIGHT / 2.0;
+        let h_eighth = LINE_HEIGHT / 8.0;
+        let y_eighth = PADDING + LINE_HEIGHT - h_eighth;
+        assert!(svg.contains(&format!(
+            r#"y="{y_half:.1}" width="{CELL_WIDTH:.1}" height="{h_half:.1}""#
+        )));
+        assert!(svg.contains(&format!(
+            r#"y="{y_eighth:.1}" width="{CELL_WIDTH:.1}" height="{h_eighth:.1}""#
+        )));
+    }
+
+    #[test]
+    fn merged_full_block_run_width() {
+        let mut buf = empty_buf(5, 1);
+        buf.set_string(
+            0,
+            0,
+            "█████",
+            Style::default().fg(Color::Rgb(0x11, 0x22, 0x33)),
+        );
+        let svg = buffer_to_svg(&buf, &nerv_palette());
+        let block_rects: Vec<_> = svg
+            .lines()
+            .filter(|l| l.contains("fill=\"#112233\"") && l.contains("<rect"))
+            .collect();
+        assert_eq!(block_rects.len(), 1);
+        assert!(block_rects[0].contains(&format!(r#"width="{:.1}""#, 5.0 * CELL_WIDTH)));
+    }
+
+    #[test]
+    fn shade_block_uses_opacity() {
+        let mut buf = empty_buf(1, 1);
+        buf[(0, 0)].set_symbol("▒").set_fg(Color::White);
+        let svg = buffer_to_svg(&buf, &nerv_palette());
+        assert!(svg.contains(r#"opacity="0.5""#));
+    }
+
+    #[test]
+    fn reversed_block_uses_background_colour() {
+        let mut buf = empty_buf(1, 1);
+        buf[(0, 0)].set_symbol("█").set_style(
+            Style::default()
+                .fg(Color::Red)
+                .bg(Color::Blue)
+                .add_modifier(Modifier::REVERSED),
+        );
+        let svg = buffer_to_svg(&buf, &nerv_palette());
+        assert!(svg.contains("fill=\"#0000ff\""));
+    }
+
+    #[test]
+    fn text_and_blocks_on_one_row_align() {
+        let mut buf = empty_buf(6, 1);
+        buf[(0, 0)].set_symbol("a").set_fg(Color::Yellow);
+        buf[(1, 0)].set_symbol("█").set_fg(Color::Green);
+        buf[(2, 0)].set_symbol("█").set_fg(Color::Green);
+        buf[(3, 0)].set_symbol("z").set_fg(Color::Yellow);
+        let svg = buffer_to_svg(&buf, &nerv_palette());
+        let tx_a = PADDING;
+        let tx_z = PADDING + 3.0 * CELL_WIDTH;
+        assert!(svg.contains(&format!(r#"x="{tx_a:.1}""#)));
+        assert!(svg.contains(&format!(r#"x="{tx_z:.1}""#)));
+        assert!(!svg.contains('█'));
     }
 }

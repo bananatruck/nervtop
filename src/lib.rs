@@ -8,5 +8,7 @@ pub mod cli;
 pub mod collect;
 pub mod config;
 pub mod model;
+pub mod format;
+pub mod report;
 pub mod theme;
 pub mod ui;

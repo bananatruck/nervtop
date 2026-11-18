@@ -109,7 +109,7 @@ A rule whose source is unavailable is UNKNOWN and never counts as nominal or as 
 | `swap` percent used | above | 60 | 90 | 2 | Skipped when no swap exists |
 | `disk` percent used | above | 90 | 95 | 1 | Each real mount separately |
 | `storage_temp` degrees C | above | 65 | 75 | 3 | NVMe and drive sensors |
-| `battery` percent | below | 20 | 10 | 2 | Only while discharging |
+| `battery` percent | below | 20 | 10 | 2 | Judged while discharging, or while the status is unknown and AC power is offline; nominal while charging, full, not charging, or unknown on AC; UNKNOWN ("battery status unknown") when the status is unknown and AC state is not reported |
 
 ## Consensus panel
 

@@ -6,7 +6,15 @@ use nervtop::{report, runtime, screenshot};
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    let command = match cli::parse(std::env::args().skip(1)) {
+    let args: Result<Vec<String>, _> = std::env::args_os()
+        .skip(1)
+        .map(|a| a.into_string())
+        .collect();
+    let Ok(args) = args else {
+        eprintln!("nervtop: an argument is not valid UTF-8\nTry 'nervtop --help'.");
+        return ExitCode::from(2);
+    };
+    let command = match cli::parse(args) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("nervtop: {e}\nTry 'nervtop --help'.");
@@ -82,7 +90,7 @@ fn run(options: Options, mut app: App) -> std::io::Result<()> {
     if let Some(path) = &options.screenshot {
         screenshot::collect(&mut collector, &mut app, options.samples, redactor.as_mut());
         let (w, h) = options.size;
-        std::fs::write(path, screenshot::svg(&mut app, w, h))?;
+        screenshot::write_file(path, &screenshot::svg(&mut app, w, h))?;
         return Ok(());
     }
     runtime::run(collector, app)

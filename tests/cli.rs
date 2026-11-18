@@ -134,3 +134,17 @@ fn a_closed_stdout_is_not_a_crash() {
     assert!(!err.contains("panicked"), "{err}");
     assert_eq!(out.status.code(), Some(0), "{err}");
 }
+
+#[test]
+fn a_non_utf8_argument_is_a_usage_error_not_a_panic() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+    let o = Command::new(env!("CARGO_BIN_EXE_nervtop"))
+        .arg("--config")
+        .arg(OsString::from_vec(vec![0x66, 0xff, 0x6f]))
+        .output()
+        .expect("run nervtop");
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(!err.contains("panicked"), "{err}");
+    assert_eq!(o.status.code(), Some(2), "{err}");
+}

@@ -48,8 +48,60 @@ pub fn render(app: &mut App, width: u16, height: u16) -> Buffer {
     terminal.backend().buffer().clone()
 }
 
+/// Writes `contents` to `path` through a temporary file in the same
+/// directory and a rename, so a full disk never leaves a truncated image and
+/// an existing symlink at `path` is replaced rather than followed.
+pub fn write_file(path: &std::path::Path, contents: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let dir = match path.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d,
+        _ => std::path::Path::new("."),
+    };
+    let name = path
+        .file_name()
+        .ok_or_else(|| std::io::Error::other("screenshot path has no file name"))?;
+    let tmp = dir.join(format!(
+        ".{}.{}.tmp",
+        name.to_string_lossy(),
+        std::process::id()
+    ));
+    let result = (|| {
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)?;
+        f.write_all(contents.as_bytes())?;
+        f.sync_all()?;
+        std::fs::rename(&tmp, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
 /// Renders `app` to an SVG document.
 pub fn svg(app: &mut App, width: u16, height: u16) -> String {
     let buffer = render(app, width, height);
     buffer_to_svg(&buffer, &app.palette)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn write_replaces_a_symlink_instead_of_following_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("precious.txt");
+        std::fs::write(&target, "keep me").unwrap();
+        let link = dir.path().join("shot.svg");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        write_file(&link, "<svg/>").unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep me");
+        assert_eq!(std::fs::read_to_string(&link).unwrap(), "<svg/>");
+        assert!(!std::fs::symlink_metadata(&link).unwrap().is_symlink());
+        let leftovers = std::fs::read_dir(dir.path()).unwrap().count();
+        assert_eq!(leftovers, 2, "no temporary file left behind");
+    }
 }

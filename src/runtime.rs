@@ -120,6 +120,21 @@ impl Drop for CollectorExit {
     }
 }
 
+/// Waits at most `within` for the collector thread to finish after it was
+/// told to quit, and joins it if it did. A collector stuck inside `sample()`
+/// is left behind (returning `false`) so quitting never hangs on it; the
+/// process exits without it.
+fn wait_for_collector(collector: thread::JoinHandle<()>, within: Duration) -> bool {
+    let deadline = Instant::now() + within;
+    while !collector.is_finished() {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    collector.join().is_ok()
+}
+
 pub fn run(collector: Collector, mut app: App) -> io::Result<()> {
     use signal_hook::{
         consts::{SIGHUP, SIGINT, SIGTERM},
@@ -186,10 +201,12 @@ pub fn run(collector: Collector, mut app: App) -> io::Result<()> {
         Ok(())
     })();
     let _ = control_tx.send(Control::Quit);
-    signal_handle.close();
     drop(restore);
-    let _ = collector_thread.join();
+    // Drop the signal handlers first so a second Ctrl-C works normally even
+    // if the collector is stuck.
+    signal_handle.close();
     let _ = signal_thread.join();
+    wait_for_collector(collector_thread, Duration::from_secs(1));
     result
 }
 fn draw(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> io::Result<()> {
@@ -264,6 +281,38 @@ mod tests {
         );
         tx.send(Control::Quit).unwrap();
         worker.join().unwrap();
+    }
+    #[test]
+    fn stopping_a_stuck_collector_is_bounded() {
+        let (control, _ignored) = mpsc::channel();
+        // A collector stuck inside sample() never reads its controls.
+        let stuck = thread::spawn(|| {
+            loop {
+                thread::park();
+            }
+        });
+        let (done, finished) = mpsc::channel();
+        thread::spawn(move || {
+            let start = Instant::now();
+            let _ = control.send(Control::Quit);
+            let stopped = wait_for_collector(stuck, Duration::from_secs(1));
+            let _ = done.send((stopped, start.elapsed()));
+        });
+        let (stopped, elapsed) = finished
+            .recv_timeout(Duration::from_secs(3))
+            .expect("quit must not wait on a stuck collector");
+        assert!(!stopped);
+        assert!(elapsed < Duration::from_millis(1500), "{elapsed:?}");
+    }
+    #[test]
+    fn stopping_a_healthy_collector_joins_it() {
+        let (control, controls) = mpsc::channel();
+        let (events, _received) = mpsc::channel();
+        let worker = thread::spawn(move || collect_loop(collector(), 10000, controls, events));
+        let start = Instant::now();
+        control.send(Control::Quit).unwrap();
+        assert!(wait_for_collector(worker, Duration::from_secs(1)));
+        assert!(start.elapsed() < Duration::from_millis(500));
     }
     #[test]
     fn collector_control_disconnect_exits() {

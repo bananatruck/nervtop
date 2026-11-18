@@ -20,7 +20,7 @@ It ships no logos, artwork, fonts, audio or dialogue from any show.
 Download the static Linux x86_64 binary from the latest release and run it:
 
 ```sh
-curl -sL https://github.com/bananatruck/nervtop/releases/download/v0.1.0/nervtop-v0.1.0-x86_64-unknown-linux-musl.tar.gz | tar xz -C ~/.local/bin --strip-components=1 nervtop-v0.1.0-x86_64-unknown-linux-musl/nervtop
+mkdir -p ~/.local/bin && curl -sL https://github.com/bananatruck/nervtop/releases/download/v0.1.0/nervtop-v0.1.0-x86_64-unknown-linux-musl.tar.gz | tar xz -C ~/.local/bin --strip-components=1 nervtop-v0.1.0-x86_64-unknown-linux-musl/nervtop
 nervtop
 ```
 
@@ -87,7 +87,9 @@ Below 80x24 nervtop shows the current size and the minimum, and keeps sampling s
 | `/` | Filter processes by name; `Enter` keeps the filter, `Esc` clears it |
 | `j`, `k`, arrows | Move the process selection |
 | `PgUp`, `PgDn`, `g`, `G` | Page up, page down, top, bottom |
-| `a` | Acknowledge alerts: the banner stops flashing its stripes until a new alert fires |
+| `a` | Acknowledge alerts: the banner drops its warning stripes and keeps only its label until a rule rises to a higher level |
+
+While the help overlay is open, the next key only closes it.
 
 ## The consensus strip
 
@@ -169,7 +171,7 @@ A test proves that the output of `--print-config` parses to exactly the built-in
 | Theme | Look |
 | --- | --- |
 | `nerv` | 24-bit colour: charcoal green, amber, orange and pale green, matching NERV Fieldnotes |
-| `phosphor` | Green monochrome, like an old CRT |
+| `phosphor` | A green phosphor CRT look, with yellow-green for caution and red kept for alerts |
 | `ansi` | Only the 16 terminal colours, so it follows a pywal, base16 or any other terminal scheme |
 
 Any colour slot can be overridden with `#rrggbb`, an ANSI colour name or `reset`.
@@ -181,7 +183,7 @@ Overrides apply to the theme named in the config file; `--theme` with a differen
 ## Command line
 
 ```text
-nervtop [OPTIONS]
+Usage: nervtop [OPTIONS]
 
   --config PATH       Read a config file
   --interval MS       Sample every 250 to 10000 ms
@@ -195,10 +197,12 @@ nervtop [OPTIONS]
   --samples N         Samples taken before the screenshot, 1 to 600 (default 4)
   -h, --help          Print help
   -V, --version       Print version
+
+Use --print-config to see all configuration keys and defaults.
 ```
 
-`nervtop --once` prints a plain text report of every reading, every rule and the consensus, which is handy over SSH or in a script.
-`nervtop --once --json` prints the same data as JSON for other tools and agents.
+`nervtop --once` prints a plain text report of every reading (the 15 busiest processes rather than the full list), every rule and the consensus, which is handy over SSH or in a script.
+`nervtop --once --json` prints the full snapshot, every rule and the consensus as JSON for other tools and agents.
 A one-shot report has no history, so its alert levels are instantaneous (sustain 1).
 
 ## Where the numbers come from
@@ -211,7 +215,7 @@ When something cannot be read, nervtop shows `unavailable` and the reason, never
 | CPU usage, load, frequency, memory, swap, processes, users | [`sysinfo`](https://crates.io/crates/sysinfo) |
 | Disk space | `sysinfo` disks, real block devices only, one entry per device |
 | Disk read and write rates | `/proc/diskstats` |
-| Network rates and totals | `sysinfo` network counters, loopback hidden |
+| Network rates and totals | `sysinfo` network counters, loopback and never-used interfaces hidden |
 | Temperatures and fans | `/sys/class/hwmon` |
 | AMD GPU | `gpu_busy_percent`, `mem_info_vram_*` and hwmon files of the PCI device |
 | NVIDIA GPU | `nvidia-smi --query-gpu`, at most once every 2 seconds, with a 2 second timeout |
@@ -246,7 +250,7 @@ signal thread ─────┘
 
 | Module | Role |
 | --- | --- |
-| `collect` | One trait per metric source; real sources read sysinfo, `/proc` and `/sys`, fakes serve tests |
+| `collect` | Every metric source implements one shared `Source` trait (host info uses `HostSource`); real sources read sysinfo, `/proc` and `/sys`, fakes serve tests |
 | `alert` | Rules with sustain and hysteresis, and the three-cell consensus |
 | `app` | All UI state and key handling, with no terminal code |
 | `ui` | Draws an `&App` into a frame and keeps no state of its own |
@@ -271,14 +275,14 @@ The suite has 209 tests (and 2 ignored ones that need the live machine or a real
 Parsers are tested against captured sysfs and procfs text, including the battery values of a real ASUS laptop, and every sysfs reader takes a root directory so tests run on temporary trees.
 Render tests draw the real UI into ratatui's `TestBackend` at 80x24, 120x40 and 200x60 and assert on the drawn buffer.
 Integration tests run the built binary.
-CI runs all three commands on every push, and the release workflow runs them again before it builds and smoke-tests the static binary.
+CI runs all three commands on every push to main and on every pull request, and the release workflow runs them again before it builds and smoke-tests the static binary.
 
 ### Screenshots
 
 Every image in this README is the real program showing live data from the machine it ran on.
 
 ```sh
-cargo build --locked
+cargo build --release --locked
 scripts/screenshots.sh
 ```
 

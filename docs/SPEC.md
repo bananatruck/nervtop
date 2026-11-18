@@ -64,11 +64,11 @@ Below 80 columns or 24 rows nervtop draws a single centered message that states 
 | `/` | Start a process name filter; `Enter` keeps it, `Esc` clears it (also after it was kept) |
 | `j`, `k`, arrows | Move the process selection |
 | `PgUp`, `PgDn`, `g`, `G` | Page, top and bottom of the process list |
-| `a` | Acknowledge current alerts, which stops the banner from flashing until a new alert fires |
+| `a` | Acknowledge current alerts, which removes the banner's warning stripes until a rule rises to a higher level |
 
 ## Data sources and fallbacks
 
-Every source implements one trait so it can be swapped for a fake in tests.
+Every source implements the shared `Source` trait (host info implements `HostSource`), so it can be swapped for a fake in tests.
 Each sample returns `Reading::Available(value)` or `Reading::Unavailable(reason)`.
 
 | Metric | Primary source | Fallback or unavailable rule |
@@ -78,13 +78,13 @@ Each sample returns `Reading::Available(value)` or `Reading::Unavailable(reason)
 | CPU frequency | `sysinfo` per-core frequency | Hidden when every core reports 0 MHz |
 | Memory and swap | `sysinfo` memory | Swap shows "none configured" when total swap is 0 |
 | Disks | `sysinfo::Disks` for space, `/proc/diskstats` for read and write rates | Rates are unavailable until two samples exist; pseudo and duplicate filesystems are hidden |
-| Network | `sysinfo::Networks` byte counters | Rates unavailable until two samples exist; loopback is hidden |
+| Network | `sysinfo::Networks` byte counters | Rates unavailable until two samples exist; loopback and interfaces that have never sent or received a byte are hidden |
 | Processes | `sysinfo` processes with CPU and memory refresh only | Users resolve through `sysinfo::Users`; unknown UIDs show the number |
 | Temperatures | `/sys/class/hwmon/*/temp*_input` with labels and `crit` values | Unavailable when no readable sensor exists |
 | Fans | `/sys/class/hwmon/*/fan*_input` | Section hidden when the machine exposes no fans |
-| AMD GPU | `/sys/class/drm/card*/device/gpu_busy_percent`, `mem_info_vram_*`, hwmon temperature and power | Per-field unavailable when a file is missing |
+| AMD GPU | `/sys/bus/pci/devices/<slot>/gpu_busy_percent`, `mem_info_vram_*`, and the device's hwmon `temp1_input` and `power1_average` (or `power1_input`) | Per-field unavailable when a file is missing |
 | NVIDIA GPU | `nvidia-smi --query-gpu` CSV with a 2 s timeout, run in a sample only when every NVIDIA display adapter's `power/runtime_status` is `active`, `unsupported` (runtime PM disabled, so always powered) or missing; a killed nvidia-smi that cannot be reaped within 200 ms is left to a background reaper so a sample is never blocked by it | A `suspended` or `suspending` adapter shows SUSPENDED with every field "gpu suspended"; a `resuming` adapter shows "gpu resuming" and an `error` adapter "gpu runtime pm error"; while any NVIDIA adapter is in one of those states nvidia-smi is not run at all, because it enumerates and would wake every NVIDIA device, and the awake NVIDIA adapters show "not queried: another nvidia gpu is asleep"; when nvidia-smi is missing or fails the GPU shows unavailable with the reason |
-| Battery | `/sys/class/power_supply/BAT*` capacity, status, energy or charge, power or current, charge limit | Time remaining only when the discharge or charge rate is known and non-zero; no battery shows "no battery present" |
+| Battery | The first `/sys/class/power_supply/*` entry whose `type` is `Battery`, that is present, and whose `scope` is not `Device` (peripherals): capacity, status, energy or charge, power or current, charge limit | Time remaining only when the discharge or charge rate is known and non-zero; no battery shows "no battery present" |
 | Host | hostname, kernel release and uptime from `sysinfo` | Unknown fields show unavailable |
 
 NVIDIA queries are rate limited to at most one every 2 seconds, whatever the UI interval, because each call costs tens of milliseconds of CPU.
@@ -113,7 +113,7 @@ A rule whose source is unavailable is UNKNOWN and never counts as nominal or as 
 
 ## Consensus panel
 
-Three judgement cells each watch one domain and vote NOMINAL, CAUTION or ALERT, or NO DATA when every input is unknown.
+Three judgement cells each watch one domain and vote NOMINAL, CAUTION or CRITICAL, or NO DATA when every input is unknown.
 COMPUTE watches `cpu_usage` and `load`.
 GPU utilisation is shown but not judged, so a busy GPU during a game is not an alarm.
 THERMAL watches `cpu_temp`, `gpu_temp` and `storage_temp`.
@@ -123,7 +123,7 @@ The verdict is the worst vote among the three cells, and the panel also states w
 
 ## Theme system
 
-Built-in themes: `nerv` (default, 24-bit colour, matches nerv-fieldnotes), `phosphor` (green monochrome CRT), and `ansi` (only the 16 terminal palette colours, so it follows a pywal or base16 terminal scheme).
+Built-in themes: `nerv` (default, 24-bit colour, matches nerv-fieldnotes), `phosphor` (green phosphor CRT look, with yellow-green for caution and red kept for alerts), and `ansi` (only the 16 terminal palette colours, so it follows a pywal or base16 terminal scheme).
 The config file selects a theme and may override any of its slots with `#rrggbb` or an ANSI colour name.
 Slots: `background`, `surface`, `border`, `text`, `muted`, `accent`, `heading`, `nominal`, `caution`, `alert`, `unknown`, `stripe_dark`.
 `background = "reset"` leaves the terminal background unpainted so transparency and blur from the terminal show through.
@@ -143,7 +143,7 @@ Unknown keys and invalid values are errors that name the key, printed before the
 | `--interval MS` | Sample interval in milliseconds, 250 to 10000 |
 | `--theme NAME` | Start with this theme; colour overrides from the config file apply only to the theme they were written for |
 | `--print-config` | Print the documented default config and exit |
-| `--once` | Take a warm-up sample, then sample again after one interval, print a plain text report with instantaneous alert levels (sustain 1, since a single report has no history), and exit |
+| `--once` | Take a warm-up sample, a baseline sample 250 ms later, and the reported sample one full interval after the baseline, print a plain text report with instantaneous alert levels (sustain 1, since a single report has no history), and exit |
 | `--json` | With `--once`, print the report as JSON |
 | `--screenshot PATH` | Render the real UI with live data to an SVG file and exit |
 | `--size WxH` | Terminal size for `--screenshot`, default 120x40 |
@@ -157,7 +157,7 @@ Unknown keys and invalid values are errors that name the key, printed before the
 `alert` turns a snapshot plus thresholds into rule states and the consensus.
 `app` holds all UI state and applies key events and snapshots; it has no terminal code.
 `ui` draws an `&App` into a ratatui frame and holds no state of its own.
-`main` wires a collector thread and an input thread into one channel and blocks on it, so the program sleeps between events.
+`runtime` wires a collector thread, an input thread and a signal thread into one channel and blocks on it, so the program sleeps between events.
 `svg` converts a ratatui buffer into an SVG image for honest screenshots.
 
 ## Test plan
@@ -168,4 +168,4 @@ Alert tests cover thresholds in both directions, sustain, hysteresis, unknown ha
 App tests cover every key binding, sort order, filtering, selection that follows a PID, pause, interval limits and screen cycling.
 Render tests draw the real UI into ratatui's `TestBackend` with fake snapshots at 80x24, 120x40 and 200x60 and assert on the buffer: panel titles present, "unavailable" shown for missing sources, alert banner present only at CRITICAL, the too-small message below 80x24, and the help overlay text.
 An integration test runs the built binary with `--print-config` and `--once` and checks the output.
-CI runs `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` on every push.
+CI runs `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked` on every push to main and on every pull request.

@@ -84,8 +84,9 @@ pub fn draw_alerts(frame: &mut Frame, area: Rect, app: &App) {
             .value
             .map(|v| format!(" ({})", format_rule_value(ev.rule, v)))
             .unwrap_or_default();
+        let clock_str = crate::clock::hms(ev.at_ms, app.utc_offset_secs.unwrap_or(0));
         lines.push(Line::from(vec![
-            Span::styled(format!("{} ", fmt::hms_utc(ev.at_ms)), muted),
+            Span::styled(format!("{clock_str} "), muted),
             Span::styled(format!("{}{subj} ", ev.rule.label()), text_style),
             Span::styled(
                 format!("{}->{}", ev.from.label(), ev.to.label()),

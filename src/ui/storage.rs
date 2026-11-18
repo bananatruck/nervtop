@@ -87,6 +87,7 @@ fn render_disk(
 
     let pct = d.used_percent().unwrap_or(0.0);
     let bar_w = if width >= 64 { 8 } else { 4 };
+    let (filled, empty) = fmt::bar(bar_w, pct);
     let reason_room = if width >= 60 { 24 } else { 11 };
 
     let r_span = match &d.read_bps {
@@ -101,7 +102,8 @@ fn render_disk(
     if two_line {
         lines.push(Line::from(vec![
             Span::styled(format!("{:<8} ", d.mount_point), bold_text),
-            Span::styled(fmt::bar(bar_w, pct), Style::default().fg(bar_color)),
+            Span::styled(filled, Style::default().fg(bar_color)),
+            Span::styled(empty, Style::default().fg(p.border)),
             Span::styled(format!(" {:>5} ", fmt::percent(pct)), bold_text),
             Span::styled(fmt::bytes_pair(d.used_bytes(), d.total_bytes), text_style),
         ]));
@@ -112,18 +114,24 @@ fn render_disk(
             w_span,
         ]));
     } else {
-        lines.push(Line::from(vec![
+        let pct_s = fmt::percent(pct);
+        let pair_s = fmt::bytes_pair(d.used_bytes(), d.total_bytes);
+        let base_len =
+            d.mount_point.chars().count() + 1 + bar_w + 1 + pct_s.len() + 1 + pair_s.len();
+        let rates_len = 3 + r_span.content.chars().count() + 3 + w_span.content.chars().count();
+        let mut row = vec![
             Span::styled(format!("{} ", d.mount_point), bold_text),
-            Span::styled(fmt::bar(bar_w, pct), Style::default().fg(bar_color)),
-            Span::styled(format!(" {} ", fmt::percent(pct)), bold_text),
-            Span::styled(
-                format!("{} ", fmt::bytes_pair(d.used_bytes(), d.total_bytes)),
-                text_style,
-            ),
-            Span::styled("R ", muted),
-            r_span,
-            Span::styled(" W ", muted),
-            w_span,
-        ]));
+            Span::styled(filled, Style::default().fg(bar_color)),
+            Span::styled(empty, Style::default().fg(p.border)),
+            Span::styled(format!(" {pct_s} "), bold_text),
+            Span::styled(pair_s, text_style),
+        ];
+        if base_len + rates_len <= width {
+            row.push(Span::styled(" R ", muted));
+            row.push(r_span);
+            row.push(Span::styled(" W ", muted));
+            row.push(w_span);
+        }
+        lines.push(Line::from(row));
     }
 }

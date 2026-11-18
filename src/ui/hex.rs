@@ -15,7 +15,6 @@ use ratatui::widgets::{Block, BorderType, Paragraph, Widget};
 pub struct HexCell<'a> {
     pub name: &'a str,
     pub vote: Level,
-    pub reason: Option<&'a str>,
     pub palette: &'a Palette,
 }
 
@@ -24,7 +23,6 @@ impl<'a> HexCell<'a> {
         Self {
             name: vote.cell.name(),
             vote: vote.vote,
-            reason: vote.reason.as_deref(),
             palette,
         }
     }
@@ -82,16 +80,10 @@ impl Widget for HexCell<'_> {
         ]);
         buf.set_line(area.x, top_y + 2, &row2, area.width);
 
-        // Row 3: \   reason   /
-        let detail = match self.vote {
-            Level::Caution | Level::Critical => self.reason.unwrap_or(""),
-            _ => "",
-        };
-        let centered_detail = center_text(detail, inner_wide);
-        let detail_style = Style::default().fg(self.palette.muted);
+        // Row 3: \            /
         let row3 = Line::from(vec![
             Span::styled("\\", outline_style),
-            Span::styled(centered_detail, detail_style),
+            Span::styled(" ".repeat(inner_wide), outline_style),
             Span::styled("/", outline_style),
         ]);
         buf.set_line(area.x, top_y + 3, &row3, area.width);
@@ -315,6 +307,24 @@ mod tests {
         HexCell::new(&vote, &palette).render(area_narrow, &mut buf_narrow);
         let text_narrow = buffer_text(&buf_narrow);
         assert!(text_narrow.contains("[COMPUTE-1"), "{text_narrow}");
+    }
+
+    #[test]
+    fn hex_cell_never_draws_reason_inside_hexagon() {
+        let palette = Palette::builtin(ThemeName::Nerv);
+        let vote = CellVote {
+            cell: CellId::Thermal,
+            vote: Level::Caution,
+            reason: Some("CPU TEMP k10temp Tctl 94.4°C".into()),
+        };
+        let area = Rect::new(0, 0, 22, 5);
+        let mut buf = Buffer::empty(area);
+        HexCell::new(&vote, &palette).render(area, &mut buf);
+        let text = buffer_text(&buf);
+        assert!(text.contains("THERMAL-2"), "{text}");
+        assert!(text.contains("CAUTION"), "{text}");
+        assert!(!text.contains("CPU TEMP"), "{text}");
+        assert!(!text.contains("k10temp"), "{text}");
     }
 
     #[test]

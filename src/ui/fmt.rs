@@ -91,15 +91,6 @@ pub fn duration(secs: u64) -> String {
     }
 }
 
-/// Formats milliseconds since Unix epoch as `HH:MM:SS` in UTC.
-pub fn hms_utc(ms: u64) -> String {
-    let total_secs = (ms / 1000) % 86_400;
-    let h = total_secs / 3_600;
-    let m = (total_secs % 3_600) / 60;
-    let s = total_secs % 60;
-    format!("{h:02}:{m:02}:{s:02}")
-}
-
 /// Formats a percentage with one decimal place.
 pub fn percent(pct: f64) -> String {
     if !pct.is_finite() {
@@ -126,10 +117,6 @@ pub fn unavailable_str(reason: &str, max_width: usize) -> String {
     let full = format!("unavailable ({r})");
     if max_width >= full.len() {
         full
-    } else if max_width >= 15 {
-        let keep = max_width.saturating_sub(14);
-        let snippet: String = r.chars().take(keep).collect();
-        format!("unavailable ({snippet})")
     } else {
         "unavailable".to_string()
     }
@@ -157,10 +144,11 @@ pub fn reading_span<T>(
     }
 }
 
-/// Builds a horizontal block bar of `width` characters for `pct` (0.0..=100.0).
-pub fn bar(width: usize, pct: f64) -> String {
+/// Builds a horizontal line bar of `width` characters for `pct` (0.0..=100.0),
+/// returning `(filled, empty)` using `━` for the filled part and `─` for the empty part.
+pub fn bar(width: usize, pct: f64) -> (String, String) {
     if width == 0 {
-        return String::new();
+        return (String::new(), String::new());
     }
     let clamped = if pct.is_finite() {
         pct.clamp(0.0, 100.0)
@@ -170,14 +158,7 @@ pub fn bar(width: usize, pct: f64) -> String {
     let filled = ((clamped / 100.0) * width as f64).round() as usize;
     let filled = filled.min(width);
     let empty = width.saturating_sub(filled);
-    let mut s = String::with_capacity(width * 3);
-    for _ in 0..filled {
-        s.push('█');
-    }
-    for _ in 0..empty {
-        s.push('░');
-    }
-    s
+    ("━".repeat(filled), "─".repeat(empty))
 }
 
 #[cfg(test)]
@@ -209,14 +190,12 @@ mod tests {
     }
 
     #[test]
-    fn formats_durations_and_utc_clock() {
+    fn formats_durations() {
         assert_eq!(duration(0), "0s");
         assert_eq!(duration(45), "45s");
         assert_eq!(duration(125), "2m 05s");
         assert_eq!(duration(3661), "1h 01m 01s");
         assert_eq!(duration(90_061), "1d 01h 01m");
-        assert_eq!(hms_utc(0), "00:00:00");
-        assert_eq!(hms_utc((13 * 3600 + 45 * 60 + 9) * 1000), "13:45:09");
     }
 
     #[test]
@@ -226,10 +205,10 @@ mod tests {
         assert_eq!(percent(f64::NAN), "0.0%");
         assert_eq!(freq_mhz(800), "800 MHz");
         assert_eq!(freq_mhz(3450), "3.45 GHz");
-        assert_eq!(bar(0, 50.0), "");
-        assert_eq!(bar(4, 0.0), "░░░░");
-        assert_eq!(bar(4, 50.0), "██░░");
-        assert_eq!(bar(4, 100.0), "████");
+        assert_eq!(bar(0, 50.0), ("".into(), "".into()));
+        assert_eq!(bar(4, 0.0), ("".into(), "────".into()));
+        assert_eq!(bar(4, 50.0), ("━━".into(), "──".into()));
+        assert_eq!(bar(4, 100.0), ("━━━━".into(), "".into()));
     }
 
     #[test]

@@ -414,4 +414,246 @@ mod tests {
         assert_eq!(buf_full[(0, 2)].bg, custom_bg);
         assert_eq!(buf_full[(0, 3)].bg, custom_bg);
     }
+
+    #[test]
+    fn header_clock_present_when_offset_some_and_absent_when_none() {
+        let mut app = nominal_app();
+        // taken_at_ms = 1_763_452_319_000 -> 07:51:59 UTC -> 23:51:59 at UTC-8
+        app.utc_offset_secs = None;
+        let lines_none = buffer_lines(&render(&app, 120, 40));
+        assert!(!lines_none[0].contains("23:51:59"), "{}", lines_none[0]);
+        assert!(!lines_none[0].contains("07:51:59"), "{}", lines_none[0]);
+
+        app.utc_offset_secs = Some(-8 * 3600);
+        let lines_some = buffer_lines(&render(&app, 120, 40));
+        assert!(
+            lines_some[0].ends_with("23:51:59"),
+            "header should end with local clock: '{}'",
+            lines_some[0]
+        );
+    }
+
+    #[test]
+    fn header_at_80_columns_drops_whole_parts_never_cuts_words_and_keeps_clock() {
+        let mut app = nominal_app();
+        app.utc_offset_secs = Some(-8 * 3600);
+
+        let lines = buffer_lines(&render(&app, 80, 24));
+        let hdr = &lines[0];
+        assert!(
+            hdr.contains("1 OVR") || hdr.contains("1:OVERVIEW"),
+            "expected short or full tab label in 80-col header: '{hdr}'"
+        );
+        assert!(
+            hdr.ends_with("23:51:59"),
+            "expected clock at right end of 80-col header: '{hdr}'"
+        );
+        assert!(hdr.starts_with("NERVTOP "), "'{hdr}'");
+        assert!(hdr.contains("1000ms"), "'{hdr}'");
+
+        // Ensure no word is cut in half: every whitespace-separated token must be a complete part
+        let valid_tokens = [
+            "NERVTOP",
+            "magi-01",
+            "6.12.4-arch1",
+            "up",
+            "4h",
+            "02m",
+            "00s",
+            "[1:OVERVIEW]",
+            "2:PROCESSES",
+            "3:DIAGNOSTICS",
+            "[1",
+            "OVR]",
+            "1",
+            "OVR",
+            "2",
+            "PROC",
+            "3",
+            "DIAG",
+            "1000ms",
+            "nerv",
+            "PAUSED",
+            "23:51:59",
+        ];
+        for tok in hdr.split_whitespace() {
+            assert!(
+                valid_tokens.contains(&tok),
+                "unexpected or cut token '{tok}' in 80-col header '{hdr}'"
+            );
+        }
+
+        // With a longer hostname and PAUSED active at 80 columns, short tabs `1 OVR` are used
+        app.paused = true;
+        app.snapshot.as_mut().unwrap().host.hostname =
+            Reading::Available("archlinux-workstation".into());
+        let paused_hdr = &buffer_lines(&render(&app, 80, 24))[0];
+        assert!(paused_hdr.contains("[1 OVR]"), "'{paused_hdr}'");
+        assert!(paused_hdr.contains("2 PROC"), "'{paused_hdr}'");
+        assert!(paused_hdr.contains("3 DIAG"), "'{paused_hdr}'");
+        assert!(paused_hdr.contains("PAUSED"), "'{paused_hdr}'");
+        assert!(paused_hdr.ends_with("23:51:59"), "'{paused_hdr}'");
+    }
+
+    #[test]
+    fn hex_cell_area_contains_no_reason_text_while_verdict_box_keeps_it() {
+        let app = critical_disk_app();
+        let buf = render(&app, 160, 48);
+        let lines = buffer_lines(&buf);
+        // Row 0 is header, Row 1 is critical banner, Rows 2..7 are the 5-row consensus strip.
+        // The three hex cells occupy columns 0..66 (3 * 22); the verdict box is at 66..160.
+        for row in &lines[2..7] {
+            let hex_region: String = row.chars().take(66).collect();
+            assert!(
+                !hex_region.contains("DISK /"),
+                "hex cell region must not contain reason text: '{hex_region}'"
+            );
+        }
+        let verdict_region: String = lines[2..7]
+            .iter()
+            .map(|r| r.chars().skip(66).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            verdict_region.contains("RESOURCE-3: DISK / 97.0%"),
+            "verdict box must contain reason text:\n{verdict_region}"
+        );
+    }
+
+    #[test]
+    fn overview_at_80x24_shows_all_16_core_glyphs_and_hottest_core() {
+        let app = nominal_app();
+        let text = buffer_text(&render(&app, 80, 24));
+        let cores_line = text
+            .lines()
+            .find(|l| l.contains("CORES "))
+            .expect("compact CORES strip present at 80x24");
+        // nominal_app has 16 cores; core 6 is 88.0%
+        let expected_glyphs = "▂▂▅▁▃▄█▂▂▂▃▄▁▁▃▃";
+        assert_eq!(expected_glyphs.chars().count(), 16);
+        assert!(
+            cores_line.contains(&format!("CORES {expected_glyphs} max C06 88%")),
+            "expected all 16 core glyphs and max C06 88% on line: '{cores_line}'"
+        );
+    }
+
+    #[test]
+    fn memory_rows_have_no_gauge_overlap_and_match_exact_ram_line() {
+        let app = nominal_app();
+        let buf = render(&app, 120, 40);
+        let lines = buffer_lines(&buf);
+        let ram_row = lines
+            .iter()
+            .find(|l| l.contains("RAM  "))
+            .expect("RAM row present");
+        // Left column at 120x40 is 60 wide; inner content is between borders at cols 1..59
+        let ram_inner: String = ram_row.chars().skip(1).take(58).collect();
+        assert_eq!(
+            ram_inner.trim_end(),
+            "RAM  ━━━━──── 7.0 GiB/16.0 GiB  43.8%"
+        );
+
+        let swap_row = lines
+            .iter()
+            .find(|l| l.contains("SWAP "))
+            .expect("SWAP row present");
+        let swap_inner: String = swap_row.chars().skip(1).take(58).collect();
+        assert_eq!(
+            swap_inner.trim_end(),
+            "SWAP ━─────── 512.0 MiB/4.0 GiB  12.5%"
+        );
+    }
+
+    #[test]
+    fn network_orders_busiest_interface_first_on_overview_and_diagnostics() {
+        use crate::model::NetInterface;
+        let mut app = nominal_app();
+        // Put idle docker bridges before wlan0; wlan0 has higher rate (and higher total when rates tie)
+        app.snapshot.as_mut().unwrap().network = Reading::Available(vec![
+            NetInterface {
+                name: "br-7237d48b080b".into(),
+                rx_bps: Reading::Available(0.0),
+                tx_bps: Reading::Available(0.0),
+                rx_total_bytes: 230 * 1024,
+                tx_total_bytes: 260 * 1024,
+            },
+            NetInterface {
+                name: "veth5d9f83b".into(),
+                rx_bps: Reading::unavailable("warming up"),
+                tx_bps: Reading::unavailable("warming up"),
+                rx_total_bytes: 126,
+                tx_total_bytes: 50 * 1024,
+            },
+            NetInterface {
+                name: "wlan0".into(),
+                rx_bps: Reading::Available(0.0),
+                tx_bps: Reading::Available(0.0),
+                rx_total_bytes: 8 * 1024 * 1024 * 1024,
+                tx_total_bytes: 1024 * 1024 * 1024,
+            },
+        ]);
+
+        let ov_lines = buffer_lines(&render(&app, 160, 48));
+        let wlan_ov = ov_lines
+            .iter()
+            .position(|l| l.contains("wlan0"))
+            .expect("wlan0 in overview");
+        let br_ov = ov_lines
+            .iter()
+            .position(|l| l.contains("br-7237d48b080b"))
+            .expect("br in overview");
+        assert!(
+            wlan_ov < br_ov,
+            "wlan0 (row {wlan_ov}) must appear before idle bridge (row {br_ov}) in overview"
+        );
+
+        app.screen = Screen::Diagnostics;
+        let diag_lines = buffer_lines(&render(&app, 160, 48));
+        let wlan_diag = diag_lines
+            .iter()
+            .position(|l| l.contains("wlan0"))
+            .expect("wlan0 in diagnostics");
+        let br_diag = diag_lines
+            .iter()
+            .position(|l| l.contains("br-7237d48b080b"))
+            .expect("br in diagnostics");
+        assert!(
+            wlan_diag < br_diag,
+            "wlan0 (row {wlan_diag}) must appear before idle bridge (row {br_diag}) in diagnostics"
+        );
+    }
+
+    #[test]
+    fn diagnostics_at_160_cols_shows_full_gpu_name_storage_values_battery_kv_and_alert_log_text() {
+        let mut app = nominal_app();
+        app.screen = Screen::Diagnostics;
+        if let Reading::Available(gpus) = &mut app.snapshot.as_mut().unwrap().gpus {
+            gpus[0].name = "NVIDIA GeForce RTX 4060 Laptop GPU".into();
+            gpus[0].pci_slot = "0000:01:00.0".into();
+            gpus[0].memory_used_bytes = Reading::Available(485_597_184); // 463.1 MiB
+            gpus[0].memory_total_bytes = Reading::Available(536_870_912); // 512.0 MiB
+        }
+        if let Reading::Available(bat) = &mut app.snapshot.as_mut().unwrap().battery {
+            bat.cycle_count = None;
+        }
+
+        let text = buffer_text(&render(&app, 160, 48));
+        assert!(
+            text.contains("NVIDIA GeForce RTX 4060 Laptop GPU"),
+            "full GPU name must be visible at 160 cols:\n{text}"
+        );
+        assert!(text.contains("0000:01:00.0"), "{text}");
+        assert!(text.contains("463.1 MiB/512.0 MiB"), "{text}");
+        assert!(text.contains("280.0 GiB/500.0 GiB"), "{text}");
+        assert!(text.contains("STATUS"), "{text}");
+        assert!(text.contains("discharging"), "{text}");
+        assert!(text.contains(" disconnected"), "{text}");
+        assert!(text.contains("TIME LEFT"), "{text}");
+        assert!(text.contains("CYCLES"), "{text}");
+        assert!(text.contains("unavailable (not reported)"), "{text}");
+        assert!(
+            text.contains("no level changes since start"),
+            "expected empty alert log message:\n{text}"
+        );
+    }
 }

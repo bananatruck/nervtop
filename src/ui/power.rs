@@ -65,11 +65,13 @@ pub fn draw_power(frame: &mut Frame, area: Rect, app: &App) {
 
     let w = inner.width as usize;
     let bar_w = if w >= 54 { 8 } else { 4 };
-    let reason_room = if w >= 60 { 20 } else { 11 };
+    let reason_room = if w >= 60 { 48 } else { 11 };
 
+    let (filled, empty) = fmt::bar(bar_w, bat.percent);
     let mut row1 = vec![
         Span::styled(format!("{} ", bat.name), bold_text),
-        Span::styled(fmt::bar(bar_w, bat.percent), Style::default().fg(bar_color)),
+        Span::styled(filled, Style::default().fg(bar_color)),
+        Span::styled(empty, Style::default().fg(p.border)),
         Span::styled(format!(" {} ", fmt::percent(bat.percent)), bold_text),
         Span::styled(status_label(bat.status), text_style),
     ];
@@ -102,6 +104,12 @@ pub fn draw_power(frame: &mut Frame, area: Rect, app: &App) {
         lines.push(Line::from(row1));
     } else if inner.height == 2 {
         lines.push(Line::from(row1));
+        let row2_base_len = 4
+            + pwr_span.content.chars().count()
+            + 5
+            + rem_span.content.chars().count()
+            + 6
+            + hlth_span.content.chars().count();
         let mut row2 = vec![
             Span::styled("PWR ", muted),
             pwr_span,
@@ -111,7 +119,10 @@ pub fn draw_power(frame: &mut Frame, area: Rect, app: &App) {
             hlth_span,
         ];
         if let Some(lim) = bat.charge_limit_percent {
-            row2.push(Span::styled(format!(" LIM {lim}%"), muted));
+            let lim_s = format!(" LIM {lim}%");
+            if row2_base_len + lim_s.len() <= w {
+                row2.push(Span::styled(lim_s, muted));
+            }
         }
         lines.push(Line::from(row2));
     } else {

@@ -1,4 +1,4 @@
-//! MEMORY panel: RAM and swap gauges with binary byte units.
+//! MEMORY panel: RAM and swap usage bars with binary byte units.
 
 use crate::alert::{Level, RuleId};
 use crate::app::App;
@@ -9,7 +9,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Gauge, Paragraph, Sparkline};
+use ratatui::widgets::{Paragraph, Sparkline};
 
 /// Draws the MEMORY panel.
 pub fn draw_memory(frame: &mut Frame, area: Rect, app: &App) {
@@ -58,18 +58,15 @@ pub fn draw_memory(frame: &mut Frame, area: Rect, app: &App) {
         _ => p.nominal,
     };
 
+    let muted = Style::default().fg(p.muted);
+    let text_style = Style::default().fg(p.text);
+    let bold_text = Style::default().fg(p.text).add_modifier(Modifier::BOLD);
+    let border_style = Style::default().fg(p.border);
+
+    let bar_w = if inner.width >= 40 { 8 } else { 4 };
     let used = mem.used_bytes();
     let ram_pct = mem.used_percent().unwrap_or(0.0);
-    let ram_ratio = if ram_pct.is_finite() {
-        (ram_pct / 100.0).clamp(0.0, 1.0)
-    } else {
-        0.0
-    };
-    let ram_label = format!(
-        "RAM  {} ({})",
-        fmt::bytes_pair(used, mem.total_bytes),
-        fmt::percent(ram_pct)
-    );
+    let (ram_filled, ram_empty) = fmt::bar(bar_w, ram_pct);
 
     let rows = Layout::vertical([
         Constraint::Length(1),
@@ -78,52 +75,50 @@ pub fn draw_memory(frame: &mut Frame, area: Rect, app: &App) {
     ])
     .split(inner);
 
-    let ram_gauge = Gauge::default()
-        .ratio(ram_ratio)
-        .label(Span::styled(
-            ram_label,
-            Style::default().fg(p.text).add_modifier(Modifier::BOLD),
-        ))
-        .style(Style::default().fg(p.muted).bg(p.surface))
-        .gauge_style(Style::default().fg(ram_color).bg(p.surface));
-    frame.render_widget(ram_gauge, rows[0]);
+    let ram_line = Line::from(vec![
+        Span::styled("RAM  ", bold_text),
+        Span::styled(ram_filled, Style::default().fg(ram_color)),
+        Span::styled(ram_empty, border_style),
+        Span::styled(
+            format!(" {}  ", fmt::bytes_pair(used, mem.total_bytes)),
+            text_style,
+        ),
+        Span::styled(fmt::percent(ram_pct), bold_text),
+    ]);
+    frame.render_widget(Paragraph::new(ram_line), rows[0]);
 
     if rows[1].height > 0 {
         if mem.swap_total_bytes == 0 {
             let line = Line::from(vec![
-                Span::styled("SWAP ", Style::default().fg(p.muted)),
-                Span::styled("none configured", Style::default().fg(p.muted)),
+                Span::styled("SWAP ", bold_text),
+                Span::styled("none configured", muted),
             ]);
             frame.render_widget(Paragraph::new(line), rows[1]);
         } else {
             let swap_pct = mem.swap_used_percent().unwrap_or(0.0);
-            let swap_ratio = if swap_pct.is_finite() {
-                (swap_pct / 100.0).clamp(0.0, 1.0)
-            } else {
-                0.0
-            };
-            let swap_label = format!(
-                "SWAP {} ({})",
-                fmt::bytes_pair(mem.swap_used_bytes, mem.swap_total_bytes),
-                fmt::percent(swap_pct)
-            );
-            let swap_gauge = Gauge::default()
-                .ratio(swap_ratio)
-                .label(Span::styled(
-                    swap_label,
-                    Style::default().fg(p.text).add_modifier(Modifier::BOLD),
-                ))
-                .style(Style::default().fg(p.muted).bg(p.surface))
-                .gauge_style(Style::default().fg(swap_color).bg(p.surface));
-            frame.render_widget(swap_gauge, rows[1]);
+            let (swap_filled, swap_empty) = fmt::bar(bar_w, swap_pct);
+            let swap_line = Line::from(vec![
+                Span::styled("SWAP ", bold_text),
+                Span::styled(swap_filled, Style::default().fg(swap_color)),
+                Span::styled(swap_empty, border_style),
+                Span::styled(
+                    format!(
+                        " {}  ",
+                        fmt::bytes_pair(mem.swap_used_bytes, mem.swap_total_bytes)
+                    ),
+                    text_style,
+                ),
+                Span::styled(fmt::percent(swap_pct), bold_text),
+            ]);
+            frame.render_widget(Paragraph::new(swap_line), rows[1]);
         }
     }
 
     if rows[2].height > 0 {
         let extra = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(rows[2]);
         let avail_line = Line::from(vec![
-            Span::styled("AVAIL ", Style::default().fg(p.muted)),
-            Span::styled(fmt::bytes(mem.available_bytes), Style::default().fg(p.text)),
+            Span::styled("AVAIL ", muted),
+            Span::styled(fmt::bytes(mem.available_bytes), text_style),
         ]);
         frame.render_widget(Paragraph::new(avail_line), extra[0]);
 

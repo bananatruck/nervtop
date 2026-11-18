@@ -1,7 +1,7 @@
 //! NETWORK panel: per-interface RX/TX rates and totals, plus RX/TX sparklines when space allows.
 
 use crate::app::App;
-use crate::model::Reading;
+use crate::model::{NetInterface, Reading};
 use crate::ui::fmt;
 use crate::ui::header::{draw_acquiring, draw_unavailable, panel_block};
 use ratatui::Frame;
@@ -9,6 +9,30 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Sparkline};
+
+/// Returns network interfaces ordered busiest first:
+/// by current `rx+tx` rate descending (unavailable rates count as `0`),
+/// then lifetime `rx+tx` total descending, then name ascending.
+pub fn sorted_interfaces(ifaces: &[NetInterface]) -> Vec<&NetInterface> {
+    fn clean_rate(r: &Reading<f64>) -> f64 {
+        match r {
+            Reading::Available(v) if v.is_finite() && *v > 0.0 => *v,
+            _ => 0.0,
+        }
+    }
+    let mut sorted: Vec<&NetInterface> = ifaces.iter().collect();
+    sorted.sort_by(|a, b| {
+        let rate_a = clean_rate(&a.rx_bps) + clean_rate(&a.tx_bps);
+        let rate_b = clean_rate(&b.rx_bps) + clean_rate(&b.tx_bps);
+        let total_a = u128::from(a.rx_total_bytes) + u128::from(a.tx_total_bytes);
+        let total_b = u128::from(b.rx_total_bytes) + u128::from(b.tx_total_bytes);
+        rate_b
+            .total_cmp(&rate_a)
+            .then_with(|| total_b.cmp(&total_a))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    sorted
+}
 
 /// Draws the NETWORK telemetry panel.
 pub fn draw_network(frame: &mut Frame, area: Rect, app: &App) {
@@ -61,7 +85,8 @@ pub fn draw_network(frame: &mut Frame, area: Rect, app: &App) {
     let reason_room = if w >= 60 { 22 } else { 11 };
     let mut lines: Vec<Line<'static>> = Vec::new();
 
-    for iface in ifaces.iter().take(text_area.height as usize) {
+    let sorted = sorted_interfaces(ifaces);
+    for iface in sorted.into_iter().take(text_area.height as usize) {
         let rx_span = match &iface.rx_bps {
             Reading::Available(bps) => Span::styled(fmt::rate(*bps), text_style),
             Reading::Unavailable(r) => Span::styled(fmt::unavailable_str(r, reason_room), unknown),

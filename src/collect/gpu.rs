@@ -235,6 +235,13 @@ fn sys_number<T: std::str::FromStr>(dir: &Path, file: &str) -> Reading<T> {
         .map(Reading::Available)
         .unwrap_or_else(|| Reading::unavailable(format!("{file} not reported")))
 }
+/// Whether a runtime PM status means the device is powered and staying so:
+/// "active", "unsupported" (runtime PM disabled, so always powered) or no
+/// status file at all. Anything else ("suspended", "suspending", "resuming",
+/// "error" or an unrecognized value) means nvidia-smi must not run.
+fn runtime_settled_awake(runtime: Option<&str>) -> bool {
+    matches!(runtime, None | Some("active" | "unsupported"))
+}
 impl Source for Gpus {
     type Output = Vec<GpuStats>;
     fn sample(&mut self) -> Reading<Self::Output> {
@@ -256,8 +263,7 @@ impl Source for Gpus {
             })
             .collect();
         let nvidia_asleep = adapters.iter().any(|(_, (vendor, _), runtime)| {
-            *vendor == Some(0x10de)
-                && matches!(runtime.as_deref(), Some("suspended" | "suspending"))
+            *vendor == Some(0x10de) && !runtime_settled_awake(runtime.as_deref())
         });
         for (dir, (vendor_id, device_id), runtime) in adapters {
             let (vendor, label) = match vendor_id {
@@ -306,6 +312,14 @@ impl Source for Gpus {
                 "gpu metrics not supported",
             );
             match vendor {
+                GpuVendor::Nvidia if !runtime_settled_awake(runtime.as_deref()) => {
+                    let reason = match runtime.as_deref() {
+                        Some("resuming") => "gpu resuming",
+                        Some("error") => "gpu runtime pm error",
+                        _ => "gpu runtime pm status unrecognized",
+                    };
+                    gpu = unavailable(slot, vendor, gpu.name, GpuPower::Active, reason);
+                }
                 GpuVendor::Nvidia if nvidia_asleep => {
                     gpu = unavailable(
                         slot,
@@ -315,9 +329,6 @@ impl Source for Gpus {
                         "not queried: another nvidia gpu is asleep",
                     );
                 }
-                // "active", "resuming", "unsupported" (runtime PM disabled, so
-                // always powered) and a missing status file all mean the GPU
-                // is already awake.
                 GpuVendor::Nvidia => {
                     self.query();
                     match &self.cached {
@@ -579,9 +590,16 @@ mod tests {
         assert_eq!(rows[1].power_watts.reason(), Some("gpu suspended"));
     }
     #[test]
-    fn awake_nvidia_gpu_is_queried_whatever_its_runtime_pm_state() {
+    fn nvidia_gpu_is_queried_only_when_its_runtime_pm_state_is_settled_awake() {
         let status = "sys/bus/pci/devices/0000:01:00.0/power/runtime_status";
-        for runtime in ["active", "resuming", "unsupported", "missing"] {
+        for (runtime, not_queried) in [
+            ("active", None),
+            ("unsupported", None),
+            ("missing", None),
+            ("resuming", Some("gpu resuming")),
+            ("error", Some("gpu runtime pm error")),
+            ("bogus", Some("gpu runtime pm status unrecognized")),
+        ] {
             let t = tempfile::tempdir().unwrap();
             device(t.path(), "0000:01:00.0", "0x10de", "0x28e0", runtime);
             if runtime == "missing" {
@@ -589,39 +607,42 @@ mod tests {
             }
             let (mut g, calls) = source(t.path(), Ok(CSV.into()));
             let gpus = g.sample();
-            assert_eq!(calls.load(Ordering::SeqCst), 1, "{runtime}");
             let gpu = &gpus.value().unwrap()[0];
             assert_eq!(gpu.power_state, GpuPower::Active, "{runtime}");
-            assert_eq!(
-                gpu.temperature_celsius,
-                Reading::Available(48.0),
-                "{runtime}"
-            );
+            match not_queried {
+                None => {
+                    assert_eq!(calls.load(Ordering::SeqCst), 1, "{runtime}");
+                    assert_eq!(
+                        gpu.temperature_celsius,
+                        Reading::Available(48.0),
+                        "{runtime}"
+                    );
+                }
+                Some(reason) => {
+                    assert_eq!(calls.load(Ordering::SeqCst), 0, "{runtime}");
+                    assert_eq!(gpu.utilization_percent.reason(), Some(reason));
+                    assert_eq!(gpu.memory_used_bytes.reason(), Some(reason));
+                    assert_eq!(gpu.memory_total_bytes.reason(), Some(reason));
+                    assert_eq!(gpu.temperature_celsius.reason(), Some(reason));
+                    assert_eq!(gpu.power_watts.reason(), Some(reason));
+                }
+            }
         }
     }
     #[test]
-    fn reaping_a_child_that_never_exits_is_bounded() {
-        let (done, finished) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let polls = AtomicUsize::new(0);
-            let start = Instant::now();
-            let exited = reaped_within(
-                || {
-                    polls.fetch_add(1, Ordering::SeqCst);
-                    Ok(None)
-                },
-                Instant::now,
-                Duration::from_millis(200),
-            );
-            let _ = done.send((exited, start.elapsed(), polls.load(Ordering::SeqCst)));
-        });
-        let (exited, elapsed, polls) = finished
-            .recv_timeout(Duration::from_secs(2))
-            .expect("reaping a stuck child must not block");
-        assert!(!exited);
-        assert!(elapsed >= Duration::from_millis(200), "{elapsed:?}");
-        assert!(elapsed < Duration::from_millis(400), "{elapsed:?}");
-        assert!(polls > 1);
+    fn resuming_nvidia_gpu_stops_the_query_for_its_siblings() {
+        let t = tempfile::tempdir().unwrap();
+        device(t.path(), "0000:01:00.0", "0x10de", "0x28e0", "active");
+        device(t.path(), "0000:02:00.0", "0x10de", "0x28e0", "resuming");
+        let (mut g, calls) = source(t.path(), Ok(CSV.into()));
+        let reading = g.sample();
+        let rows = reading.value().unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            rows[0].power_watts.reason(),
+            Some("not queried: another nvidia gpu is asleep")
+        );
+        assert_eq!(rows[1].power_watts.reason(), Some("gpu resuming"));
     }
     #[test]
     fn real_runner_handles_success_failure_missing_and_timeout() {

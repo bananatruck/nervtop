@@ -103,13 +103,23 @@ pub fn draw_thermal(frame: &mut Frame, area: Rect, app: &App) {
 
     // If only 1 row was available and we have both temps and fans, append fan summary on that row
     if !sensors.fans.is_empty() {
+        let w = inner.width as usize;
         let mut fan_spans = vec![Span::styled("FAN ", muted)];
+        let mut used_w = 4usize;
         for (i, f) in sensors.fans.iter().enumerate() {
+            let lbl = format!("{} ", f.label);
+            let val = format!("{} RPM", f.rpm);
+            let sep_w = if i > 0 { 2 } else { 0 };
+            let entry_w = sep_w + lbl.chars().count() + val.chars().count();
+            if i > 0 && used_w + entry_w > w {
+                break;
+            }
             if i > 0 {
                 fan_spans.push(Span::styled("  ", muted));
             }
-            fan_spans.push(Span::styled(format!("{} ", f.label), muted));
-            fan_spans.push(Span::styled(format!("{} RPM", f.rpm), text_style));
+            fan_spans.push(Span::styled(lbl, muted));
+            fan_spans.push(Span::styled(val, text_style));
+            used_w += entry_w;
         }
         if fan_rows > 0 {
             lines.push(Line::from(fan_spans));

@@ -59,6 +59,7 @@ pub fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     if area.width == 0 || area.height == 0 {
         return;
     }
+    let width = area.width as usize;
     let p = &app.palette;
     let base_style = Style::default().bg(p.background).fg(p.text);
     let muted = Style::default().bg(p.background).fg(p.muted);
@@ -67,64 +68,153 @@ pub fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
         .bg(p.background)
         .fg(p.accent)
         .add_modifier(Modifier::BOLD);
+    let paused_style = Style::default()
+        .bg(p.background)
+        .fg(p.caution)
+        .add_modifier(Modifier::BOLD);
 
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    spans.push(Span::styled("NERVTOP ", accent));
+    let clock_str = match (&app.snapshot, app.utc_offset_secs) {
+        (Some(snap), Some(offset)) => Some(crate::clock::hms(snap.taken_at_ms, offset)),
+        _ => None,
+    };
 
-    if let Some(snap) = &app.snapshot {
-        let reason_room = if area.width >= 120 { 28 } else { 11 };
-        match &snap.host.hostname {
-            Reading::Available(h) => spans.push(Span::styled(h.clone(), base_style)),
-            Reading::Unavailable(r) => {
-                spans.push(Span::styled(fmt::unavailable_str(r, reason_room), unknown));
-            }
+    let candidates = [
+        (true, true, true, true, false),
+        (false, true, true, true, false),
+        (false, false, true, true, false),
+        (false, false, false, true, false),
+        (false, false, false, true, true),
+        (false, false, false, false, false),
+        (false, false, false, false, true),
+    ];
+
+    let mut chosen_left: Vec<(String, Style)> = Vec::new();
+    for (keep_kernel, keep_uptime, keep_theme, keep_host, short_tabs) in candidates {
+        let parts = build_header_parts(
+            app,
+            keep_kernel,
+            keep_uptime,
+            keep_theme,
+            keep_host,
+            short_tabs,
+            base_style,
+            muted,
+            unknown,
+            accent,
+            paused_style,
+        );
+        let left_len: usize = parts
+            .iter()
+            .map(|(s, _)| s.chars().count())
+            .sum::<usize>()
+            .saturating_add(parts.len().saturating_sub(1));
+        let total_len = match &clock_str {
+            Some(c) => left_len + 1 + c.chars().count(),
+            None => left_len,
+        };
+        chosen_left = parts;
+        if total_len <= width {
+            break;
         }
-        spans.push(Span::styled(" ", muted));
-        match &snap.host.kernel {
-            Reading::Available(k) => spans.push(Span::styled(k.clone(), muted)),
-            Reading::Unavailable(r) => {
-                spans.push(Span::styled(fmt::unavailable_str(r, reason_room), unknown));
-            }
-        }
-        spans.push(Span::styled(" ", muted));
-        match &snap.host.uptime_secs {
-            Reading::Available(u) => {
-                spans.push(Span::styled(format!("up {}", fmt::duration(*u)), muted));
-            }
-            Reading::Unavailable(r) => {
-                spans.push(Span::styled(fmt::unavailable_str(r, reason_room), unknown));
-            }
-        }
-    } else {
-        spans.push(Span::styled("acquiring", muted));
     }
 
-    spans.push(Span::styled(" ", muted));
-    for scr in Screen::ALL {
-        let label = format!("{}:{}", scr.key(), scr.title());
-        if scr == app.screen {
-            spans.push(Span::styled(format!("[{label}]"), accent));
-        } else {
-            spans.push(Span::styled(format!(" {label} "), muted));
+    let mut spans: Vec<Span<'static>> = Vec::with_capacity(chosen_left.len() * 2 + 2);
+    let mut left_len = 0usize;
+    for (idx, (text, style)) in chosen_left.into_iter().enumerate() {
+        if idx > 0 {
+            spans.push(Span::styled(" ", muted));
+            left_len += 1;
         }
+        left_len += text.chars().count();
+        spans.push(Span::styled(text, style));
     }
 
-    spans.push(Span::styled(format!(" {}ms", app.interval_ms), muted));
-    if area.width >= 100 {
-        spans.push(Span::styled(format!(" {}", app.theme.as_str()), muted));
-    }
-    if app.paused {
-        spans.push(Span::styled(
-            " PAUSED",
-            Style::default()
-                .bg(p.background)
-                .fg(p.caution)
-                .add_modifier(Modifier::BOLD),
-        ));
+    if let Some(clock) = clock_str {
+        let clock_len = clock.chars().count();
+        let pad = width.saturating_sub(left_len + clock_len).max(1);
+        spans.push(Span::styled(" ".repeat(pad), muted));
+        spans.push(Span::styled(clock, base_style));
     }
 
     let paragraph = Paragraph::new(Line::from(spans)).style(base_style);
     frame.render_widget(paragraph, area);
+}
+
+fn whole_unavailable(reason: &str) -> String {
+    let r = reason.trim();
+    if r.is_empty() {
+        "unavailable".to_string()
+    } else {
+        format!("unavailable ({r})")
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_header_parts(
+    app: &App,
+    keep_kernel: bool,
+    keep_uptime: bool,
+    keep_theme: bool,
+    keep_host: bool,
+    short_tabs: bool,
+    base_style: Style,
+    muted: Style,
+    unknown: Style,
+    accent: Style,
+    paused_style: Style,
+) -> Vec<(String, Style)> {
+    let mut parts: Vec<(String, Style)> = Vec::new();
+    parts.push(("NERVTOP".to_string(), accent));
+
+    if let Some(snap) = &app.snapshot {
+        if keep_host {
+            match &snap.host.hostname {
+                Reading::Available(h) => parts.push((h.clone(), base_style)),
+                Reading::Unavailable(r) => parts.push((whole_unavailable(r), unknown)),
+            }
+        }
+        if keep_kernel {
+            match &snap.host.kernel {
+                Reading::Available(k) => parts.push((k.clone(), muted)),
+                Reading::Unavailable(r) => parts.push((whole_unavailable(r), unknown)),
+            }
+        }
+        if keep_uptime {
+            match &snap.host.uptime_secs {
+                Reading::Available(u) => parts.push((format!("up {}", fmt::duration(*u)), muted)),
+                Reading::Unavailable(r) => parts.push((whole_unavailable(r), unknown)),
+            }
+        }
+    } else if keep_host {
+        parts.push(("acquiring".to_string(), muted));
+    }
+
+    for scr in Screen::ALL {
+        let label = if short_tabs {
+            match scr {
+                Screen::Overview => "1 OVR".to_string(),
+                Screen::Processes => "2 PROC".to_string(),
+                Screen::Diagnostics => "3 DIAG".to_string(),
+            }
+        } else {
+            format!("{}:{}", scr.key(), scr.title())
+        };
+        if scr == app.screen {
+            parts.push((format!("[{label}]"), accent));
+        } else {
+            parts.push((label, muted));
+        }
+    }
+
+    parts.push((format!("{}ms", app.interval_ms), muted));
+    if keep_theme {
+        parts.push((app.theme.as_str().to_string(), muted));
+    }
+    if app.paused {
+        parts.push(("PAUSED".to_string(), paused_style));
+    }
+
+    parts
 }
 
 /// Draws the one-line bottom key-hint footer bar.

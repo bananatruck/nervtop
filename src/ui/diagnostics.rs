@@ -2,16 +2,16 @@
 
 use crate::alert::{Level, RuleId, RuleStatus};
 use crate::app::App;
-use crate::model::{GpuPower, Reading, SensorKind};
+use crate::model::{BatteryStatus, GpuPower, Reading, SensorKind};
 use crate::ui::fmt;
 use crate::ui::header::{draw_acquiring, panel_block};
-use crate::ui::power::status_label;
+use crate::ui::network::sorted_interfaces;
 use crate::ui::stripes::format_rule_value;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
-use ratatui::text::Span;
-use ratatui::widgets::{Cell, Row, Table};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Cell, Paragraph, Row, Table};
 
 /// Draws the DIAGNOSTICS screen using `Table` widgets for all subsystems.
 pub fn draw_diagnostics(frame: &mut Frame, area: Rect, app: &App) {
@@ -22,8 +22,25 @@ pub fn draw_diagnostics(frame: &mut Frame, area: Rect, app: &App) {
     let cols = if area.width < 100 {
         Layout::horizontal([Constraint::Length(31), Constraint::Min(49)]).split(area)
     } else {
-        Layout::horizontal([Constraint::Percentage(42), Constraint::Percentage(58)]).split(area)
+        Layout::horizontal([Constraint::Percentage(53), Constraint::Percentage(47)]).split(area)
     };
+
+    let sensor_rows = match app.snapshot.as_ref().map(|s| &s.sensors) {
+        Some(Reading::Available(s)) => (s.temps.len() + s.fans.len()).max(1) as u16,
+        _ => 1,
+    };
+    let gpu_rows = match app.snapshot.as_ref().map(|s| &s.gpus) {
+        Some(Reading::Available(g)) => g.len().max(1) as u16,
+        _ => 1,
+    };
+    let battery_rows = match app.snapshot.as_ref().map(|s| &s.battery) {
+        Some(Reading::Available(_)) => 7,
+        _ => 1,
+    };
+
+    let sensors_h = sensor_rows + 3; // rows + header + borders
+    let gpus_h = gpu_rows + 3; // adapters + header + borders
+    let battery_h = battery_rows + 2; // its rows + borders
 
     let left_rows = if cols[0].height <= 22 {
         Layout::vertical([
@@ -33,12 +50,25 @@ pub fn draw_diagnostics(frame: &mut Frame, area: Rect, app: &App) {
             Constraint::Min(4),
         ])
         .split(cols[0])
-    } else {
+    } else if sensors_h + gpus_h + battery_h + 4 <= cols[0].height {
         Layout::vertical([
-            Constraint::Percentage(30),
-            Constraint::Percentage(24),
-            Constraint::Percentage(22),
-            Constraint::Percentage(24),
+            Constraint::Length(sensors_h),
+            Constraint::Length(gpus_h),
+            Constraint::Length(battery_h),
+            Constraint::Min(4),
+        ])
+        .split(cols[0])
+    } else {
+        let cap_gpus = gpus_h.min(cols[0].height / 4).max(4);
+        let cap_bat = battery_h.min(cols[0].height / 4).max(4);
+        let cap_sens = sensors_h
+            .min(cols[0].height.saturating_sub(cap_gpus + cap_bat + 4))
+            .max(4);
+        Layout::vertical([
+            Constraint::Length(cap_sens),
+            Constraint::Length(cap_gpus),
+            Constraint::Length(cap_bat),
+            Constraint::Min(4),
         ])
         .split(cols[0])
     };
@@ -81,67 +111,108 @@ fn draw_sensors_table(frame: &mut Frame, area: Rect, app: &App) {
     let muted = Style::default().fg(p.muted);
     let unknown = Style::default().fg(p.unknown);
 
-    let rows: Vec<Row<'static>> = match &snap.sensors {
-        Reading::Unavailable(r) => vec![Row::new(vec![
-            Cell::from(Span::styled(
+    let sensors = match &snap.sensors {
+        Reading::Unavailable(r) => {
+            let line = Line::from(Span::styled(
                 fmt::unavailable_str(r, inner.width as usize),
                 unknown,
-            )),
-            Cell::from(""),
-            Cell::from(""),
-            Cell::from(""),
-        ])],
-        Reading::Available(s) => {
-            let mut out = Vec::new();
-            for t in &s.temps {
-                let kind_str = match t.kind {
-                    SensorKind::Cpu => "cpu",
-                    SensorKind::Gpu => "gpu",
-                    SensorKind::Storage => "storage",
-                    SensorKind::Other => "other",
-                };
-                let crit_str = t
-                    .crit_celsius
-                    .map(|c| format!("crit {c:.0}°C"))
-                    .unwrap_or_else(|| "-".to_string());
-                out.push(Row::new(vec![
-                    Cell::from(Span::styled(format!("{}:{}", t.chip, t.label), text_style)),
-                    Cell::from(Span::styled(kind_str, muted)),
-                    Cell::from(Span::styled(format!("{:.1}°C", t.celsius), text_style)),
-                    Cell::from(Span::styled(crit_str, muted)),
-                ]));
-            }
-            for f in &s.fans {
-                out.push(Row::new(vec![
-                    Cell::from(Span::styled(format!("{}:{}", f.chip, f.label), text_style)),
-                    Cell::from(Span::styled("fan", muted)),
-                    Cell::from(Span::styled(format!("{} RPM", f.rpm), text_style)),
-                    Cell::from(Span::styled("-", muted)),
-                ]));
-            }
-            if out.is_empty() {
-                out.push(Row::new(vec![
-                    Cell::from(Span::styled("unavailable (no sensors)", unknown)),
-                    Cell::from(""),
-                    Cell::from(""),
-                    Cell::from(""),
-                ]));
-            }
-            out
+            ));
+            frame.render_widget(Paragraph::new(line), inner);
+            return;
         }
+        Reading::Available(s) if s.temps.is_empty() && s.fans.is_empty() => {
+            let line = Line::from(Span::styled("unavailable (no sensors)", unknown));
+            frame.render_widget(Paragraph::new(line), inner);
+            return;
+        }
+        Reading::Available(s) => s,
     };
 
-    let widths = [
-        Constraint::Min(12),
-        Constraint::Length(7),
-        Constraint::Length(9),
-        Constraint::Length(11),
+    let mut raw_rows: Vec<([String; 4], [Style; 4])> = Vec::new();
+    for t in &sensors.temps {
+        let kind_str = match t.kind {
+            SensorKind::Cpu => "cpu",
+            SensorKind::Gpu => "gpu",
+            SensorKind::Storage => "storage",
+            SensorKind::Other => "other",
+        };
+        let crit_str = t
+            .crit_celsius
+            .map(|c| format!("crit {c:.0}°C"))
+            .unwrap_or_else(|| "-".to_string());
+        raw_rows.push((
+            [
+                format!("{}:{}", t.chip, t.label),
+                kind_str.to_string(),
+                format!("{:.1}°C", t.celsius),
+                crit_str,
+            ],
+            [text_style, muted, text_style, muted],
+        ));
+    }
+    for f in &sensors.fans {
+        raw_rows.push((
+            [
+                format!("{}:{}", f.chip, f.label),
+                "fan".to_string(),
+                format!("{} RPM", f.rpm),
+                "-".to_string(),
+            ],
+            [text_style, muted, text_style, muted],
+        ));
+    }
+
+    let headers = ["SENSOR", "KIND", "VALUE", "LIMIT"];
+    let mut col_w = [
+        headers[0].len(),
+        headers[1].len(),
+        headers[2].len(),
+        headers[3].len(),
     ];
-    let mut table = Table::new(rows, widths).column_spacing(1);
-    if inner.height >= 4 {
+    for (cells, _) in &raw_rows {
+        for (i, c) in cells.iter().enumerate() {
+            col_w[i] = col_w[i].max(c.chars().count());
+        }
+    }
+
+    let w = inner.width as usize;
+    let col_indices: &[usize] = if col_w[0] + col_w[1] + col_w[2] + col_w[3] + 3 <= w {
+        &[0, 1, 2, 3]
+    } else if col_w[0] + col_w[1] + col_w[2] + 2 <= w {
+        &[0, 1, 2]
+    } else {
+        &[0, 2]
+    };
+
+    let rows: Vec<Row<'static>> = raw_rows
+        .into_iter()
+        .map(|(cells, styles)| {
+            Row::new(
+                col_indices
+                    .iter()
+                    .map(|&i| Cell::from(Span::styled(cells[i].clone(), styles[i])))
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect();
+
+    let constraints: Vec<Constraint> = col_indices
+        .iter()
+        .enumerate()
+        .map(|(pos, &i)| {
+            if pos == 0 {
+                Constraint::Min(col_w[i] as u16)
+            } else {
+                Constraint::Length(col_w[i] as u16)
+            }
+        })
+        .collect();
+
+    let mut table = Table::new(rows, constraints).column_spacing(1);
+    if inner.height >= 2 {
+        let hdr_cells: Vec<&str> = col_indices.iter().map(|&i| headers[i]).collect();
         table = table.header(
-            Row::new(vec!["SENSOR", "KIND", "VALUE", "LIMIT"])
-                .style(Style::default().fg(p.heading).add_modifier(Modifier::BOLD)),
+            Row::new(hdr_cells).style(Style::default().fg(p.heading).add_modifier(Modifier::BOLD)),
         );
     }
     frame.render_widget(table, inner);
@@ -164,113 +235,152 @@ fn draw_gpus_table(frame: &mut Frame, area: Rect, app: &App) {
     let muted = Style::default().fg(p.muted);
     let unknown = Style::default().fg(p.unknown);
 
-    let rows: Vec<Row<'static>> = match &snap.gpus {
-        Reading::Unavailable(r) => vec![Row::new(vec![
-            Cell::from(Span::styled(
+    let list = match &snap.gpus {
+        Reading::Unavailable(r) => {
+            let line = Line::from(Span::styled(
                 fmt::unavailable_str(r, inner.width as usize),
                 unknown,
-            )),
-            Cell::from(""),
-            Cell::from(""),
-            Cell::from(""),
-            Cell::from(""),
-        ])],
-        Reading::Available(list) if list.is_empty() => vec![Row::new(vec![
-            Cell::from(Span::styled("unavailable (no gpu)", unknown)),
-            Cell::from(""),
-            Cell::from(""),
-            Cell::from(""),
-            Cell::from(""),
-        ])],
-        Reading::Available(list) => list
-            .iter()
-            .map(|g| {
-                if g.power_state == GpuPower::Suspended {
-                    return Row::new(vec![
-                        Cell::from(Span::styled(
-                            format!("{} {}", g.pci_slot, g.name),
-                            text_style,
-                        )),
-                        Cell::from(Span::styled(
-                            "SUSPENDED",
-                            Style::default().fg(p.muted).add_modifier(Modifier::BOLD),
-                        )),
-                        Cell::from(Span::styled("-", muted)),
-                        Cell::from(Span::styled("-", muted)),
-                        Cell::from(Span::styled("-", muted)),
-                    ]);
-                }
-                let util_cell = match &g.utilization_percent {
-                    Reading::Available(u) => {
-                        Cell::from(Span::styled(fmt::percent(*u as f64), text_style))
-                    }
-                    Reading::Unavailable(r) => {
-                        Cell::from(Span::styled(fmt::unavailable_str(r, 11), unknown))
-                    }
-                };
-                let vram_cell = match (&g.memory_used_bytes, &g.memory_total_bytes) {
-                    (Reading::Available(u), Reading::Available(t)) => {
-                        Cell::from(Span::styled(fmt::bytes_pair(*u, *t), text_style))
-                    }
-                    (Reading::Unavailable(r), _) | (_, Reading::Unavailable(r)) => {
-                        Cell::from(Span::styled(fmt::unavailable_str(r, 11), unknown))
-                    }
-                };
-                let temp_cell = match &g.temperature_celsius {
-                    Reading::Available(c) => {
-                        Cell::from(Span::styled(format!("{c:.0}°C"), text_style))
-                    }
-                    Reading::Unavailable(r) => {
-                        Cell::from(Span::styled(fmt::unavailable_str(r, 11), unknown))
-                    }
-                };
-                let pwr_cell = match &g.power_watts {
-                    Reading::Available(w) => {
-                        Cell::from(Span::styled(format!("{w:.1}W"), text_style))
-                    }
-                    Reading::Unavailable(r) => {
-                        Cell::from(Span::styled(fmt::unavailable_str(r, 11), unknown))
-                    }
-                };
-                Row::new(vec![
-                    Cell::from(Span::styled(
-                        format!("{} {}", g.pci_slot, g.name),
-                        text_style,
-                    )),
-                    util_cell,
-                    vram_cell,
-                    temp_cell,
-                    pwr_cell,
-                ])
-            })
-            .collect(),
+            ));
+            frame.render_widget(Paragraph::new(line), inner);
+            return;
+        }
+        Reading::Available(list) if list.is_empty() => {
+            let line = Line::from(Span::styled("unavailable (no gpu)", unknown));
+            frame.render_widget(Paragraph::new(line), inner);
+            return;
+        }
+        Reading::Available(list) => list,
     };
 
-    let widths = if inner.width < 48 {
-        [
-            Constraint::Min(9),
-            Constraint::Length(11),
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-        ]
-    } else {
-        [
-            Constraint::Min(10),
-            Constraint::Length(11),
-            Constraint::Length(15),
-            Constraint::Length(7),
-            Constraint::Length(7),
-        ]
-    };
-    let mut table = Table::new(rows, widths).column_spacing(1);
-    if inner.height >= 4 {
+    let mut raw_rows: Vec<([String; 6], [Style; 6])> = Vec::with_capacity(list.len());
+    for g in list {
+        if g.power_state == GpuPower::Suspended {
+            let susp_style = Style::default().fg(p.muted).add_modifier(Modifier::BOLD);
+            raw_rows.push((
+                [
+                    g.name.clone(),
+                    g.pci_slot.clone(),
+                    "SUSPENDED".to_string(),
+                    "-".to_string(),
+                    "-".to_string(),
+                    "-".to_string(),
+                ],
+                [text_style, muted, susp_style, muted, muted, muted],
+            ));
+            continue;
+        }
+
+        let (util_s, util_st) = match &g.utilization_percent {
+            Reading::Available(u) => (fmt::percent(*u as f64), text_style),
+            Reading::Unavailable(r) => (fmt::unavailable_str(r, 11), unknown),
+        };
+        let (vram_s, vram_st) = match (&g.memory_used_bytes, &g.memory_total_bytes) {
+            (Reading::Available(u), Reading::Available(t)) => (fmt::bytes_pair(*u, *t), text_style),
+            (Reading::Unavailable(r), _) | (_, Reading::Unavailable(r)) => {
+                (fmt::unavailable_str(r, 11), unknown)
+            }
+        };
+        let (temp_s, temp_st) = match &g.temperature_celsius {
+            Reading::Available(c) => (format!("{c:.0}°C"), text_style),
+            Reading::Unavailable(r) => (fmt::unavailable_str(r, 11), unknown),
+        };
+        let (pwr_s, pwr_st) = match &g.power_watts {
+            Reading::Available(w) => (format!("{w:.1}W"), text_style),
+            Reading::Unavailable(r) => (fmt::unavailable_str(r, 11), unknown),
+        };
+
+        raw_rows.push((
+            [
+                g.name.clone(),
+                g.pci_slot.clone(),
+                util_s,
+                vram_s,
+                temp_s,
+                pwr_s,
+            ],
+            [text_style, muted, util_st, vram_st, temp_st, pwr_st],
+        ));
+    }
+
+    let headers = ["ADAPTER", "PCI", "UTIL", "VRAM", "TEMP", "PWR"];
+    let mut col_w = [
+        headers[0].len(),
+        headers[1].len(),
+        headers[2].len(),
+        headers[3].len(),
+        headers[4].len(),
+        headers[5].len(),
+    ];
+    for (cells, _) in &raw_rows {
+        for (i, c) in cells.iter().enumerate() {
+            col_w[i] = col_w[i].max(c.chars().count());
+        }
+    }
+    // Keep ADAPTER column wide enough for "NVIDIA GeForce RTX 4060 Laptop GPU" (34 chars) when width allows
+    if inner.width >= 83 {
+        col_w[0] = col_w[0].max(34);
+    }
+
+    let w = inner.width as usize;
+    let candidates: &[&[usize]] = &[
+        &[0, 1, 2, 3, 4, 5],
+        &[0, 1, 2, 3, 4],
+        &[0, 1, 2, 3],
+        &[0, 1, 2],
+        &[0, 2],
+    ];
+    let mut chosen: &[usize] = &[0, 2];
+    for &cand in candidates {
+        let sum_w: usize = cand.iter().map(|&i| col_w[i]).sum();
+        let gaps = cand.len().saturating_sub(1);
+        if sum_w + gaps <= w {
+            chosen = cand;
+            break;
+        }
+    }
+
+    let rows: Vec<Row<'static>> = raw_rows
+        .into_iter()
+        .map(|(cells, styles)| {
+            Row::new(
+                chosen
+                    .iter()
+                    .map(|&i| Cell::from(Span::styled(cells[i].clone(), styles[i])))
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect();
+
+    let constraints: Vec<Constraint> = chosen
+        .iter()
+        .enumerate()
+        .map(|(pos, &i)| {
+            if pos == 0 {
+                Constraint::Min(col_w[i] as u16)
+            } else {
+                Constraint::Length(col_w[i] as u16)
+            }
+        })
+        .collect();
+
+    let mut table = Table::new(rows, constraints).column_spacing(1);
+    if inner.height >= 2 {
+        let hdr_cells: Vec<&str> = chosen.iter().map(|&i| headers[i]).collect();
         table = table.header(
-            Row::new(vec!["ADAPTER", "UTIL", "VRAM", "TEMP", "PWR"])
-                .style(Style::default().fg(p.heading).add_modifier(Modifier::BOLD)),
+            Row::new(hdr_cells).style(Style::default().fg(p.heading).add_modifier(Modifier::BOLD)),
         );
     }
     frame.render_widget(table, inner);
+}
+
+fn diag_battery_status(status: BatteryStatus) -> &'static str {
+    match status {
+        BatteryStatus::Charging => "charging",
+        BatteryStatus::Discharging => "discharging",
+        BatteryStatus::Full => "full",
+        BatteryStatus::NotCharging => "not charging",
+        BatteryStatus::Unknown => "unknown",
+    }
 }
 
 fn draw_battery_table(frame: &mut Frame, area: Rect, app: &App) {
@@ -290,71 +400,78 @@ fn draw_battery_table(frame: &mut Frame, area: Rect, app: &App) {
     let muted = Style::default().fg(p.muted);
     let unknown = Style::default().fg(p.unknown);
 
-    let rows: Vec<Row<'static>> = match &snap.battery {
-        Reading::Unavailable(r) => vec![Row::new(vec![
-            Cell::from(Span::styled(
+    let b = match &snap.battery {
+        Reading::Unavailable(r) => {
+            let line = Line::from(Span::styled(
                 fmt::unavailable_str(r, inner.width as usize),
                 unknown,
-            )),
-            Cell::from(""),
-        ])],
-        Reading::Available(b) => {
-            let ac_str = match b.ac_online {
-                Some(true) => "online",
-                Some(false) => "offline",
-                None => "unknown",
-            };
-            let pwr_cell = match &b.power_watts {
-                Reading::Available(w) => Span::styled(format!("{w:.1} W"), text_style),
-                Reading::Unavailable(r) => Span::styled(fmt::unavailable_str(r, 18), unknown),
-            };
-            let rem_cell = match &b.time_remaining_secs {
-                Reading::Available(s) => Span::styled(fmt::duration(*s), text_style),
-                Reading::Unavailable(r) => Span::styled(fmt::unavailable_str(r, 18), unknown),
-            };
-            let hlth_cell = match &b.health_percent {
-                Reading::Available(h) => Span::styled(fmt::percent(*h), text_style),
-                Reading::Unavailable(r) => Span::styled(fmt::unavailable_str(r, 18), unknown),
-            };
-            let lim_str = b
-                .charge_limit_percent
-                .map(|l| format!("{l}%"))
-                .unwrap_or_else(|| "-".to_string());
-            let cyc_str = b
-                .cycle_count
-                .map(|c| c.to_string())
-                .unwrap_or_else(|| "-".to_string());
-
-            vec![
-                Row::new(vec![
-                    Cell::from(Span::styled(
-                        format!(
-                            "{} {} {} (AC {})",
-                            b.name,
-                            fmt::percent(b.percent),
-                            status_label(b.status),
-                            ac_str
-                        ),
-                        text_style,
-                    )),
-                    Cell::from(pwr_cell),
-                ]),
-                Row::new(vec![
-                    Cell::from(Span::styled(
-                        format!("limit {lim_str}  cycles {cyc_str}"),
-                        muted,
-                    )),
-                    Cell::from(rem_cell),
-                ]),
-                Row::new(vec![
-                    Cell::from(Span::styled("health", muted)),
-                    Cell::from(hlth_cell),
-                ]),
-            ]
+            ));
+            frame.render_widget(Paragraph::new(line), inner);
+            return;
         }
+        Reading::Available(b) => b,
     };
 
-    let widths = [Constraint::Min(18), Constraint::Length(16)];
+    let val_w = inner.width.saturating_sub(11) as usize;
+    let status_span = Span::styled(diag_battery_status(b.status), text_style);
+    let ac_span = match b.ac_online {
+        Some(true) => Span::styled("connected", text_style),
+        Some(false) => Span::styled("disconnected", text_style),
+        None => fmt::unavailable_span(p, "not reported", val_w),
+    };
+    let pwr_span = match &b.power_watts {
+        Reading::Available(w) => Span::styled(format!("{w:.1} W"), text_style),
+        Reading::Unavailable(r) => fmt::unavailable_span(p, r, val_w),
+    };
+    let rem_span = match &b.time_remaining_secs {
+        Reading::Available(s) => Span::styled(fmt::duration(*s), text_style),
+        Reading::Unavailable(r) => fmt::unavailable_span(p, r, val_w),
+    };
+    let hlth_span = match &b.health_percent {
+        Reading::Available(h) => Span::styled(fmt::percent(*h), text_style),
+        Reading::Unavailable(r) => fmt::unavailable_span(p, r, val_w),
+    };
+    let lim_span = match b.charge_limit_percent {
+        Some(l) => Span::styled(format!("{l}%"), text_style),
+        None => fmt::unavailable_span(p, "not reported", val_w),
+    };
+    let cyc_span = match b.cycle_count {
+        Some(c) => Span::styled(c.to_string(), text_style),
+        None => fmt::unavailable_span(p, "not reported", val_w),
+    };
+
+    let rows = vec![
+        Row::new(vec![
+            Cell::from(Span::styled("STATUS", muted)),
+            Cell::from(status_span),
+        ]),
+        Row::new(vec![
+            Cell::from(Span::styled("AC", muted)),
+            Cell::from(ac_span),
+        ]),
+        Row::new(vec![
+            Cell::from(Span::styled("POWER", muted)),
+            Cell::from(pwr_span),
+        ]),
+        Row::new(vec![
+            Cell::from(Span::styled("TIME LEFT", muted)),
+            Cell::from(rem_span),
+        ]),
+        Row::new(vec![
+            Cell::from(Span::styled("HEALTH", muted)),
+            Cell::from(hlth_span),
+        ]),
+        Row::new(vec![
+            Cell::from(Span::styled("LIMIT", muted)),
+            Cell::from(lim_span),
+        ]),
+        Row::new(vec![
+            Cell::from(Span::styled("CYCLES", muted)),
+            Cell::from(cyc_span),
+        ]),
+    ];
+
+    let widths = [Constraint::Length(10), Constraint::Min(15)];
     let table = Table::new(rows, widths).column_spacing(1);
     frame.render_widget(table, inner);
 }
@@ -375,84 +492,126 @@ fn draw_io_table(frame: &mut Frame, area: Rect, app: &App) {
     let text_style = Style::default().fg(p.text);
     let muted = Style::default().fg(p.muted);
     let unknown = Style::default().fg(p.unknown);
-    let mut rows: Vec<Row<'static>> = Vec::new();
+
+    let show_device = inner.width >= 56;
+    let mut raw_rows: Vec<([String; 3], [Style; 3])> = Vec::new();
 
     match &snap.disks {
         Reading::Unavailable(r) => {
-            rows.push(Row::new(vec![
-                Cell::from(Span::styled("disks", muted)),
-                Cell::from(Span::styled(fmt::unavailable_str(r, 20), unknown)),
-                Cell::from(""),
-            ]));
+            raw_rows.push((
+                [
+                    "disks".to_string(),
+                    fmt::unavailable_str(r, 24),
+                    String::new(),
+                ],
+                [muted, unknown, muted],
+            ));
         }
         Reading::Available(disks) => {
             for d in disks {
-                let rw = match (&d.read_bps, &d.write_bps) {
-                    (Reading::Available(r), Reading::Available(w)) => Span::styled(
+                let label = if show_device {
+                    format!("{} ({})", d.mount_point, d.device)
+                } else {
+                    d.mount_point.clone()
+                };
+                let (rw_s, rw_st) = match (&d.read_bps, &d.write_bps) {
+                    (Reading::Available(r), Reading::Available(w)) => (
                         format!("R {} W {}", fmt::rate(*r), fmt::rate(*w)),
                         text_style,
                     ),
                     (Reading::Unavailable(r), _) | (_, Reading::Unavailable(r)) => {
-                        Span::styled(fmt::unavailable_str(r, 16), unknown)
+                        (fmt::unavailable_str(r, 20), unknown)
                     }
                 };
-                rows.push(Row::new(vec![
-                    Cell::from(Span::styled(
-                        format!("{} ({})", d.mount_point, d.device),
-                        text_style,
-                    )),
-                    Cell::from(Span::styled(
-                        fmt::bytes_pair(d.used_bytes(), d.total_bytes),
-                        muted,
-                    )),
-                    Cell::from(rw),
-                ]));
+                raw_rows.push((
+                    [label, fmt::bytes_pair(d.used_bytes(), d.total_bytes), rw_s],
+                    [text_style, muted, rw_st],
+                ));
             }
         }
     }
 
     match &snap.network {
         Reading::Unavailable(r) => {
-            rows.push(Row::new(vec![
-                Cell::from(Span::styled("net", muted)),
-                Cell::from(Span::styled(fmt::unavailable_str(r, 20), unknown)),
-                Cell::from(""),
-            ]));
+            raw_rows.push((
+                [
+                    "net".to_string(),
+                    fmt::unavailable_str(r, 24),
+                    String::new(),
+                ],
+                [muted, unknown, muted],
+            ));
         }
         Reading::Available(ifaces) => {
-            for n in ifaces {
-                let rx_tx = match (&n.rx_bps, &n.tx_bps) {
-                    (Reading::Available(rx), Reading::Available(tx)) => Span::styled(
+            for n in sorted_interfaces(ifaces) {
+                let (rx_tx_s, rx_tx_st) = match (&n.rx_bps, &n.tx_bps) {
+                    (Reading::Available(rx), Reading::Available(tx)) => (
                         format!("RX {} TX {}", fmt::rate(*rx), fmt::rate(*tx)),
                         text_style,
                     ),
                     (Reading::Unavailable(r), _) | (_, Reading::Unavailable(r)) => {
-                        Span::styled(fmt::unavailable_str(r, 16), unknown)
+                        (fmt::unavailable_str(r, 20), unknown)
                     }
                 };
-                rows.push(Row::new(vec![
-                    Cell::from(Span::styled(n.name.clone(), text_style)),
-                    Cell::from(Span::styled(
+                raw_rows.push((
+                    [
+                        n.name.clone(),
                         format!(
                             "{}/{}",
                             fmt::bytes(n.rx_total_bytes),
                             fmt::bytes(n.tx_total_bytes)
                         ),
-                        muted,
-                    )),
-                    Cell::from(rx_tx),
-                ]));
+                        rx_tx_s,
+                    ],
+                    [text_style, muted, rx_tx_st],
+                ));
             }
         }
     }
 
-    let widths = [
-        Constraint::Min(10),
-        Constraint::Length(15),
-        Constraint::Min(14),
-    ];
-    let table = Table::new(rows, widths).column_spacing(1);
-    frame.render_widget(table, inner);
+    let mut col_w = [1usize, 1usize, 1usize];
+    for (cells, _) in &raw_rows {
+        for (i, c) in cells.iter().enumerate() {
+            col_w[i] = col_w[i].max(c.chars().count());
+        }
+    }
+
+    let w = inner.width as usize;
+    let include_rates = col_w[0] + col_w[1] + col_w[2] + 2 <= w;
+
+    if include_rates {
+        let rows: Vec<Row<'static>> = raw_rows
+            .into_iter()
+            .map(|(cells, styles)| {
+                Row::new(vec![
+                    Cell::from(Span::styled(cells[0].clone(), styles[0])),
+                    Cell::from(Span::styled(cells[1].clone(), styles[1])),
+                    Cell::from(Span::styled(cells[2].clone(), styles[2])),
+                ])
+            })
+            .collect();
+        let widths = [
+            Constraint::Min(col_w[0] as u16),
+            Constraint::Length(col_w[1] as u16),
+            Constraint::Length(col_w[2] as u16),
+        ];
+        frame.render_widget(Table::new(rows, widths).column_spacing(1), inner);
+    } else {
+        let rows: Vec<Row<'static>> = raw_rows
+            .into_iter()
+            .map(|(cells, styles)| {
+                Row::new(vec![
+                    Cell::from(Span::styled(cells[0].clone(), styles[0])),
+                    Cell::from(Span::styled(cells[1].clone(), styles[1])),
+                ])
+            })
+            .collect();
+        let widths = [
+            Constraint::Min(col_w[0] as u16),
+            Constraint::Length(col_w[1] as u16),
+        ];
+        frame.render_widget(Table::new(rows, widths).column_spacing(1), inner);
+    }
 }
 
 fn draw_rules_table(frame: &mut Frame, area: Rect, app: &App) {
@@ -489,10 +648,25 @@ fn draw_rules_table(frame: &mut Frame, area: Rect, app: &App) {
     let muted = Style::default().fg(p.muted);
     let unknown = Style::default().fg(p.unknown);
 
+    // Other 5 columns take 10 + 6 + 4 + 4 + 8 + 5 spaces = 37 columns.
+    // Only include subject when the fullest key+subject fits without truncating in the middle.
+    let max_full_rule_len = rules_slice
+        .iter()
+        .map(|r| {
+            if r.subject.is_empty() {
+                r.rule.key().len()
+            } else {
+                r.rule.key().len() + 1 + r.subject.chars().count()
+            }
+        })
+        .max()
+        .unwrap_or(12);
+    let show_subject = (inner.width as usize) >= max_full_rule_len + 36;
+
     let rows: Vec<Row<'static>> = rules_slice
         .iter()
         .map(|r| {
-            let key_subj = if r.subject.is_empty() || inner.width < 56 {
+            let key_subj = if r.subject.is_empty() || !show_subject {
                 r.rule.key().to_string()
             } else {
                 format!("{} {}", r.rule.key(), r.subject)
@@ -519,13 +693,20 @@ fn draw_rules_table(frame: &mut Frame, area: Rect, app: &App) {
         })
         .collect();
 
+    let max_level_len = rules_slice
+        .iter()
+        .map(|r| r.level.label().len())
+        .max()
+        .unwrap_or(7)
+        .max(5) as u16;
+
     let widths = [
         Constraint::Min(12),
         Constraint::Length(10),
         Constraint::Length(6),
         Constraint::Length(4),
         Constraint::Length(4),
-        Constraint::Length(8),
+        Constraint::Length(max_level_len),
     ];
 
     let mut table = Table::new(rows, widths).column_spacing(1);
@@ -550,47 +731,66 @@ fn draw_events_table(frame: &mut Frame, area: Rect, app: &App) {
     let muted = Style::default().fg(p.muted);
     let text_style = Style::default().fg(p.text);
 
-    let rows: Vec<Row<'static>> = if app.log.is_empty() {
-        vec![Row::new(vec![
-            Cell::from(Span::styled("no alert transitions recorded", muted)),
-            Cell::from(""),
-            Cell::from(""),
-            Cell::from(""),
-        ])]
-    } else {
-        app.log
-            .iter()
-            .rev()
-            .map(|ev| {
-                let subj = if ev.subject.is_empty() {
-                    ev.rule.key().to_string()
-                } else {
-                    format!("{} {}", ev.rule.key(), ev.subject)
-                };
-                let to_color = fmt::level_color(p, ev.to);
-                let val_str = ev
-                    .value
-                    .map(|v| format_rule_value(ev.rule, v))
-                    .unwrap_or_else(|| "-".to_string());
-                Row::new(vec![
-                    Cell::from(Span::styled(fmt::hms_utc(ev.at_ms), muted)),
-                    Cell::from(Span::styled(subj, text_style)),
-                    Cell::from(Span::styled(
-                        format!("{} -> {}", ev.from.label(), ev.to.label()),
-                        Style::default().fg(to_color).add_modifier(Modifier::BOLD),
-                    )),
-                    Cell::from(Span::styled(val_str, text_style)),
-                ])
-            })
-            .collect()
-    };
-
     let widths = [
         Constraint::Length(8),
         Constraint::Min(10),
-        Constraint::Length(18),
+        Constraint::Length(20),
         Constraint::Length(8),
     ];
+
+    if app.log.is_empty() {
+        if inner.height >= 2 {
+            let parts = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(inner);
+            let hdr_table = Table::new(Vec::<Row<'static>>::new(), widths)
+                .column_spacing(1)
+                .header(
+                    Row::new(vec!["TIME", "RULE", "TRANSITION", "VALUE"])
+                        .style(Style::default().fg(p.heading).add_modifier(Modifier::BOLD)),
+                );
+            frame.render_widget(hdr_table, parts[0]);
+            let empty_msg = Paragraph::new(Line::from(Span::styled(
+                "no level changes since start",
+                muted,
+            )));
+            frame.render_widget(empty_msg, parts[1]);
+        } else {
+            let empty_msg = Paragraph::new(Line::from(Span::styled(
+                "no level changes since start",
+                muted,
+            )));
+            frame.render_widget(empty_msg, inner);
+        }
+        return;
+    }
+
+    let rows: Vec<Row<'static>> = app
+        .log
+        .iter()
+        .rev()
+        .map(|ev| {
+            let subj = if ev.subject.is_empty() {
+                ev.rule.key().to_string()
+            } else {
+                format!("{} {}", ev.rule.key(), ev.subject)
+            };
+            let to_color = fmt::level_color(p, ev.to);
+            let val_str = ev
+                .value
+                .map(|v| format_rule_value(ev.rule, v))
+                .unwrap_or_else(|| "-".to_string());
+            let clock_str = crate::clock::hms(ev.at_ms, app.utc_offset_secs.unwrap_or(0));
+            Row::new(vec![
+                Cell::from(Span::styled(clock_str, muted)),
+                Cell::from(Span::styled(subj, text_style)),
+                Cell::from(Span::styled(
+                    format!("{} -> {}", ev.from.label(), ev.to.label()),
+                    Style::default().fg(to_color).add_modifier(Modifier::BOLD),
+                )),
+                Cell::from(Span::styled(val_str, text_style)),
+            ])
+        })
+        .collect();
+
     let mut table = Table::new(rows, widths).column_spacing(1);
     if inner.height >= 4 {
         table = table.header(

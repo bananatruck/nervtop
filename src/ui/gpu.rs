@@ -88,8 +88,10 @@ fn render_adapter_lines(
     let util_spans: Vec<Span<'static>> = match &gpu.utilization_percent {
         Reading::Available(u) => {
             let bar_w = if width >= 50 { 8 } else { 4 };
+            let (filled, empty) = fmt::bar(bar_w, *u as f64);
             vec![
-                Span::styled(fmt::bar(bar_w, *u as f64), Style::default().fg(p.nominal)),
+                Span::styled(filled, Style::default().fg(p.nominal)),
+                Span::styled(empty, Style::default().fg(p.border)),
                 Span::styled(format!(" {}", fmt::percent(*u as f64)), text_style),
             ]
         }
@@ -134,17 +136,53 @@ fn render_adapter_lines(
             pwr_span,
         ]));
     } else {
-        let mut row = vec![
-            Span::styled(gpu.name.clone(), name_style),
-            Span::styled(" ", muted),
-        ];
-        row.extend(util_spans);
-        row.push(Span::styled(" VRAM ", muted));
-        row.push(vram_span);
-        row.push(Span::styled(" ", muted));
-        row.push(temp_span);
-        row.push(Span::styled(" ", muted));
-        row.push(pwr_span);
+        let name_len = gpu.name.chars().count();
+        let mut row = vec![Span::styled(gpu.name.clone(), name_style)];
+        let mut used_w = name_len;
+
+        match &gpu.utilization_percent {
+            Reading::Available(u) => {
+                let pct_s = fmt::percent(*u as f64);
+                let bar_w = if width >= 50 { 8 } else { 4 };
+                if used_w + 1 + bar_w + 1 + pct_s.len() <= width {
+                    let (filled, empty) = fmt::bar(bar_w, *u as f64);
+                    row.push(Span::styled(" ", muted));
+                    row.push(Span::styled(filled, Style::default().fg(p.nominal)));
+                    row.push(Span::styled(empty, Style::default().fg(p.border)));
+                    row.push(Span::styled(format!(" {pct_s}"), text_style));
+                    used_w += 1 + bar_w + 1 + pct_s.len();
+                } else if used_w + 1 + pct_s.len() <= width {
+                    row.push(Span::styled(format!(" {pct_s}"), text_style));
+                    used_w += 1 + pct_s.len();
+                }
+            }
+            Reading::Unavailable(r) => {
+                let u_s = fmt::unavailable_str(r, reason_room);
+                if used_w + 1 + u_s.len() <= width {
+                    used_w += 1 + u_s.len();
+                    row.push(Span::styled(" ", muted));
+                    row.push(Span::styled(u_s, unknown));
+                }
+            }
+        }
+
+        let vram_w = 6 + vram_span.content.chars().count();
+        if used_w + vram_w <= width {
+            used_w += vram_w;
+            row.push(Span::styled(" VRAM ", muted));
+            row.push(vram_span);
+        }
+        let temp_w = 1 + temp_span.content.chars().count();
+        if used_w + temp_w <= width {
+            used_w += temp_w;
+            row.push(Span::styled(" ", muted));
+            row.push(temp_span);
+        }
+        let pwr_w = 1 + pwr_span.content.chars().count();
+        if used_w + pwr_w <= width {
+            row.push(Span::styled(" ", muted));
+            row.push(pwr_span);
+        }
         lines.push(Line::from(row));
     }
 }

@@ -1,0 +1,123 @@
+//! THERMAL panel: hottest temperature sensors first (marked when within 10°C of crit) and fan RPMs.
+
+use crate::app::App;
+use crate::model::{Reading, TempSensor};
+use crate::ui::header::{draw_acquiring, draw_unavailable, panel_block};
+use ratatui::Frame;
+use ratatui::layout::Rect;
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::Paragraph;
+
+/// Draws the THERMAL telemetry panel.
+pub fn draw_thermal(frame: &mut Frame, area: Rect, app: &App) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let p = &app.palette;
+    let Some(snap) = &app.snapshot else {
+        draw_acquiring(frame, area, "THERMAL", p);
+        return;
+    };
+    let sensors = match &snap.sensors {
+        Reading::Available(s) => s,
+        Reading::Unavailable(r) => {
+            draw_unavailable(frame, area, "THERMAL", r, p);
+            return;
+        }
+    };
+
+    let block = panel_block("THERMAL", p);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    if sensors.temps.is_empty() && sensors.fans.is_empty() {
+        let p_empty = Paragraph::new(Line::from(Span::styled(
+            "unavailable (no hwmon sensors)",
+            Style::default().fg(p.unknown),
+        )));
+        frame.render_widget(p_empty, inner);
+        return;
+    }
+
+    let mut sorted_temps: Vec<&TempSensor> = sensors.temps.iter().collect();
+    sorted_temps.sort_by(|a, b| b.celsius.total_cmp(&a.celsius));
+
+    let total_rows = inner.height as usize;
+    let fan_rows = if sensors.fans.is_empty()
+        || total_rows == 0
+        || (total_rows == 1 && !sorted_temps.is_empty())
+    {
+        0
+    } else {
+        1
+    };
+    let temp_rows = total_rows.saturating_sub(fan_rows);
+
+    let muted = Style::default().fg(p.muted);
+    let text_style = Style::default().fg(p.text);
+    let mut lines: Vec<Line<'static>> = Vec::with_capacity(total_rows);
+
+    for t in sorted_temps.into_iter().take(temp_rows) {
+        let near_crit = t.crit_celsius.is_some_and(|crit| t.celsius >= crit - 10.0);
+        let at_crit = t.crit_celsius.is_some_and(|crit| t.celsius >= crit);
+        let val_color = if at_crit || t.celsius >= 95.0 {
+            p.alert
+        } else if near_crit || t.celsius >= 80.0 {
+            p.caution
+        } else {
+            p.nominal
+        };
+
+        let name = if inner.width >= 44 {
+            format!("{}:{}", t.chip, t.label)
+        } else {
+            t.label.clone()
+        };
+
+        let mut spans = vec![
+            Span::styled(format!("{name:<14} "), text_style),
+            Span::styled(
+                format!("{:5.1}°C", t.celsius),
+                Style::default().fg(val_color).add_modifier(Modifier::BOLD),
+            ),
+        ];
+
+        if near_crit {
+            let crit_val = t.crit_celsius.unwrap_or(0.0);
+            spans.push(Span::styled(
+                format!(" ! (crit {crit_val:.0}°C)"),
+                Style::default().fg(p.alert).add_modifier(Modifier::BOLD),
+            ));
+        } else if let Some(crit_val) = t.crit_celsius
+            && inner.width >= 42
+        {
+            spans.push(Span::styled(format!(" / {crit_val:.0}°C"), muted));
+        }
+
+        lines.push(Line::from(spans));
+    }
+
+    // If only 1 row was available and we have both temps and fans, append fan summary on that row
+    if !sensors.fans.is_empty() {
+        let mut fan_spans = vec![Span::styled("FAN ", muted)];
+        for (i, f) in sensors.fans.iter().enumerate() {
+            if i > 0 {
+                fan_spans.push(Span::styled("  ", muted));
+            }
+            fan_spans.push(Span::styled(format!("{} ", f.label), muted));
+            fan_spans.push(Span::styled(format!("{} RPM", f.rpm), text_style));
+        }
+        if fan_rows > 0 {
+            lines.push(Line::from(fan_spans));
+        } else if let Some(first) = lines.first_mut() {
+            first.spans.push(Span::styled("  ", muted));
+            first.spans.extend(fan_spans);
+        }
+    }
+
+    frame.render_widget(Paragraph::new(lines), inner);
+}

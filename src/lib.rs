@@ -7,5 +7,6 @@ pub mod app;
 pub mod collect;
 pub mod config;
 pub mod model;
+pub mod svg;
 pub mod theme;
 pub mod ui;

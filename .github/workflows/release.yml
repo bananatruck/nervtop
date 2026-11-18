@@ -1,0 +1,60 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  TARGET: x86_64-unknown-linux-musl
+
+jobs:
+  release:
+    name: Build and publish Linux x86_64 binary
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust and the musl target
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt
+          rustup default stable
+          rustup target add "$TARGET"
+      - name: Check the tag matches Cargo.toml
+        run: |
+          version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          test "v$version" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME does not match version $version"; exit 1; }
+      - name: Format, lint and test
+        run: |
+          cargo fmt --all --check
+          cargo clippy --all-targets --locked -- -D warnings
+          cargo test --locked
+      - name: Build static release binary
+        run: cargo build --release --locked --target "$TARGET"
+      - name: Smoke test the binary
+        run: |
+          bin="target/$TARGET/release/nervtop"
+          file "$bin"
+          "$bin" --version
+          "$bin" --print-config > /dev/null
+          "$bin" --once > /dev/null
+      - name: Package
+        run: |
+          name="nervtop-$GITHUB_REF_NAME-$TARGET"
+          mkdir -p "dist/$name"
+          cp "target/$TARGET/release/nervtop" README.md LICENSE config/default.toml "dist/$name/"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          name="nervtop-$GITHUB_REF_NAME-$TARGET"
+          gh release create "$GITHUB_REF_NAME" \
+            "dist/$name.tar.gz" "dist/$name.tar.gz.sha256" \
+            --title "nervtop $GITHUB_REF_NAME" \
+            --generate-notes

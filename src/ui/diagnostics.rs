@@ -655,29 +655,15 @@ fn draw_rules_table(frame: &mut Frame, area: Rect, app: &App) {
     let muted = Style::default().fg(p.muted);
     let unknown = Style::default().fg(p.unknown);
 
-    // Other 5 columns take 10 + 6 + 4 + 4 + 8 + 5 spaces = 37 columns.
-    // Only include subject when the fullest key+subject fits without truncating in the middle.
-    let max_full_rule_len = rules_slice
-        .iter()
-        .map(|r| {
-            if r.subject.is_empty() {
-                r.rule.key().len()
-            } else {
-                r.rule.key().len() + 1 + r.subject.chars().count()
-            }
-        })
-        .max()
-        .unwrap_or(12);
-    let show_subject = (inner.width as usize) >= max_full_rule_len + 36;
+    // Other 5 columns take 10 + 6 + 4 + 4 + 8 + 5 spaces = 37 columns; the
+    // rule column gets the rest. Each row fits on its own, so one long
+    // subject (a GPU name) never hides the subjects of the other rows.
+    let rule_w = (inner.width as usize).saturating_sub(37);
 
     let rows: Vec<Row<'static>> = rules_slice
         .iter()
         .map(|r| {
-            let key_subj = if r.subject.is_empty() || !show_subject {
-                r.rule.key().to_string()
-            } else {
-                format!("{} {}", r.rule.key(), r.subject)
-            };
+            let key_subj = fit_rule_name(r.rule.key(), &r.subject, rule_w);
             let val_span = match r.value {
                 Some(v) => Span::styled(format_rule_value(r.rule, v), text_style),
                 None => {
@@ -806,4 +792,21 @@ fn draw_events_table(frame: &mut Frame, area: Rect, app: &App) {
         );
     }
     frame.render_widget(table, inner);
+}
+/// "disk /boot", or the key and as much of the subject as fits with an
+/// ellipsis, or the bare key when not even that fits.
+fn fit_rule_name(key: &str, subject: &str, width: usize) -> String {
+    if subject.is_empty() {
+        return key.to_owned();
+    }
+    let full = format!("{key} {subject}");
+    if full.chars().count() <= width {
+        return full;
+    }
+    let room = width.saturating_sub(key.chars().count() + 2);
+    if room == 0 {
+        return key.to_owned();
+    }
+    let cut: String = subject.chars().take(room).collect();
+    format!("{key} {cut}\u{2026}")
 }

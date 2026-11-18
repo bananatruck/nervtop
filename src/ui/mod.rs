@@ -161,6 +161,29 @@ mod tests {
     }
 
     #[test]
+    fn one_long_rule_subject_does_not_hide_the_others() {
+        let mut app = nominal_app();
+        app.screen = Screen::Diagnostics;
+        for r in app.rules.iter_mut() {
+            if r.rule == RuleId::GpuTemp {
+                r.subject =
+                    "0000:01:00.0 NVIDIA GeForce RTX 4060 Laptop GPU with a very long name".into();
+            }
+        }
+        let disks: Vec<String> = app
+            .rules
+            .iter()
+            .filter(|r| r.rule == RuleId::Disk)
+            .map(|r| format!("disk {}", r.subject))
+            .collect();
+        assert!(!disks.is_empty());
+        let text = buffer_text(&render(&app, 160, 48));
+        for d in disks {
+            assert!(text.contains(&d), "{d} missing:\n{text}");
+        }
+    }
+
+    #[test]
     fn core_strip_fits_many_cores_at_80x24() {
         let mut app = nominal_app();
         if let Some(s) = app.snapshot.as_mut()

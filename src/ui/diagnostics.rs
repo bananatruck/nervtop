@@ -34,7 +34,7 @@ pub fn draw_diagnostics(frame: &mut Frame, area: Rect, app: &App) {
         _ => 1,
     };
     let battery_rows = match app.snapshot.as_ref().map(|s| &s.battery) {
-        Some(Reading::Available(_)) => 7,
+        Some(Reading::Available(_)) => 8,
         _ => 1,
     };
 
@@ -441,6 +441,13 @@ fn draw_battery_table(frame: &mut Frame, area: Rect, app: &App) {
     };
 
     let rows = vec![
+        Row::new(vec![
+            Cell::from(Span::styled("CHARGE", muted)),
+            Cell::from(Span::styled(
+                format!("{} {:.1}%", b.name, b.percent),
+                text_style,
+            )),
+        ]),
         Row::new(vec![
             Cell::from(Span::styled("STATUS", muted)),
             Cell::from(status_span),

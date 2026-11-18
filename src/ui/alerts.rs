@@ -41,7 +41,13 @@ pub fn draw_alerts(frame: &mut Frame, area: Rect, app: &App) {
         .collect();
     active.sort_by_key(|a| std::cmp::Reverse(a.level));
 
-    if active.is_empty() {
+    if active.is_empty() && app.consensus.verdict == Level::Unknown {
+        // Nothing could be judged: that is not the same as healthy.
+        lines.push(Line::from(Span::styled(
+            "NO DATA - no reading could be judged",
+            Style::default().fg(p.unknown),
+        )));
+    } else if active.is_empty() {
         lines.push(Line::from(Span::styled(
             "NOMINAL - no active alerts",
             Style::default().fg(p.nominal),

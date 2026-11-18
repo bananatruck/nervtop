@@ -232,9 +232,14 @@ pub fn draw_consensus(frame: &mut Frame, area: Rect, consensus: &Consensus, pale
         ),
     ]));
 
-    if reasons.is_empty() {
+    if reasons.is_empty() && consensus.verdict == Level::Unknown {
         lines.push(Line::from(Span::styled(
-            "All monitored domains within configured bounds",
+            "NO DATA - nothing could be judged yet",
+            Style::default().fg(palette.unknown),
+        )));
+    } else if reasons.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "All judged domains within configured bounds",
             Style::default().fg(palette.muted),
         )));
     } else {

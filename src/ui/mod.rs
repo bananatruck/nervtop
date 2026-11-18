@@ -113,6 +113,72 @@ mod tests {
     use crate::model::Reading;
     use ratatui::style::Color;
 
+    fn all_unavailable_app() -> App {
+        let mut app = nominal_app();
+        let mut snap = app.snapshot.clone().unwrap();
+        snap.cpu = Reading::unavailable("x");
+        snap.memory = Reading::unavailable("x");
+        snap.disks = Reading::unavailable("x");
+        snap.sensors = Reading::unavailable("x");
+        snap.gpus = Reading::unavailable("x");
+        snap.battery = Reading::unavailable("x");
+        let config = Config::default();
+        let palette = config.palette().unwrap();
+        app = App::new(config, palette);
+        app.apply_snapshot(snap);
+        app
+    }
+
+    #[test]
+    fn nothing_judged_is_never_called_nominal() {
+        let app = all_unavailable_app();
+        assert_eq!(app.consensus.verdict, crate::alert::Level::Unknown);
+        let text = buffer_text(&render(&app, 160, 48));
+        assert!(!text.contains("no active alerts"), "{text}");
+        assert!(!text.contains("within configured bounds"), "{text}");
+        assert!(text.contains("NO DATA"), "{text}");
+    }
+
+    #[test]
+    fn diagnostics_shows_battery_name_and_charge() {
+        let mut app = nominal_app();
+        app.screen = Screen::Diagnostics;
+        let b = app
+            .snapshot
+            .as_ref()
+            .unwrap()
+            .battery
+            .value()
+            .unwrap()
+            .clone();
+        let lines = buffer_lines(&render(&app, 160, 48));
+        let row = lines
+            .iter()
+            .find(|l| l.contains("CHARGE"))
+            .expect("a CHARGE row in the battery box");
+        assert!(row.contains(&b.name), "{row}");
+        assert!(row.contains(&format!("{:.1}%", b.percent)), "{row}");
+    }
+
+    #[test]
+    fn core_strip_fits_many_cores_at_80x24() {
+        let mut app = nominal_app();
+        if let Some(s) = app.snapshot.as_mut()
+            && let Reading::Available(c) = &mut s.cpu
+        {
+            c.per_core = (0..256).map(|i| (i % 100) as f32).collect();
+        }
+        let lines = buffer_lines(&render(&app, 80, 24));
+        let strip = lines
+            .iter()
+            .find(|l| l.contains("CORES"))
+            .expect("a core strip");
+        assert!(
+            strip.contains("max C"),
+            "the hottest core must stay visible: {strip}"
+        );
+    }
+
     #[test]
     fn overview_panel_titles_present_at_80x24_120x40_and_200x60() {
         let app = nominal_app();

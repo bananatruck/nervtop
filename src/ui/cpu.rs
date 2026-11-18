@@ -159,9 +159,14 @@ pub fn draw_cpu(frame: &mut Frame, area: Rect, app: &App) {
                 lines.push(Line::from(row_spans));
             }
         } else {
-            let mut strip = Vec::with_capacity(cpu.per_core.len() + 2);
+            // One glyph per core when they fit; otherwise each glyph shows the
+            // busiest core of a group, so the strip and the max stay visible.
+            let budget = (inner.width as usize).saturating_sub(6 + 15).max(1);
+            let group = cpu.per_core.len().div_ceil(budget).max(1);
+            let mut strip = Vec::with_capacity(budget + 2);
             strip.push(Span::styled("CORES ", muted));
-            for &pct in &cpu.per_core {
+            for chunk in cpu.per_core.chunks(group) {
+                let pct = chunk.iter().copied().fold(0.0_f32, f32::max);
                 let ch = core_glyph(pct);
                 let color = fmt::cpu_bar_color(p, pct);
                 strip.push(Span::styled(ch.to_string(), Style::default().fg(color)));

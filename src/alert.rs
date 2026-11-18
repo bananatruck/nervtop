@@ -229,6 +229,281 @@ pub struct AlertEvent {
     pub value: Option<f64>,
 }
 
+use crate::config::{AlertConfig, RuleConfig};
+use crate::model::{BatteryStatus, GpuPower, SensorKind, Snapshot};
+use std::collections::BTreeMap;
+
+#[derive(Debug, Clone, Default)]
+pub struct AlertEngine {
+    states: BTreeMap<(RuleId, String), RuleState>,
+}
+
+#[derive(Debug, Clone)]
+struct RuleState {
+    level: Level,
+    warn_samples: u32,
+    crit_samples: u32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Evaluation {
+    pub rules: Vec<RuleStatus>,
+    pub consensus: Consensus,
+    pub events: Vec<AlertEvent>,
+}
+
+impl AlertEngine {
+    pub fn evaluate(&mut self, snapshot: &Snapshot, config: &AlertConfig) -> Evaluation {
+        let mut rules = Vec::new();
+        let mut events = Vec::new();
+        let mut next = BTreeMap::new();
+        for (rule, (_, cfg, _)) in RuleId::ALL.into_iter().zip(config.rules()) {
+            if !cfg.enabled {
+                continue;
+            }
+            for (subject, value, note, nominal) in inputs(snapshot, rule) {
+                let key = (rule, subject.clone());
+                let mut state = self.states.remove(&key).unwrap_or(RuleState {
+                    level: Level::Unknown,
+                    warn_samples: 0,
+                    crit_samples: 0,
+                });
+                let previous = state.level;
+                state.update(value, nominal, rule.fires_below(), cfg, config.sustain);
+                if previous != state.level
+                    && !matches!(
+                        (previous, state.level),
+                        (Level::Unknown, Level::Nominal) | (Level::Nominal, Level::Unknown)
+                    )
+                {
+                    events.push(AlertEvent {
+                        at_ms: snapshot.taken_at_ms,
+                        rule,
+                        subject: subject.clone(),
+                        from: previous,
+                        to: state.level,
+                        value,
+                    });
+                }
+                rules.push(RuleStatus {
+                    rule,
+                    subject,
+                    value,
+                    level: state.level,
+                    warn: cfg.warn,
+                    crit: cfg.crit,
+                    note,
+                });
+                next.insert(key, state);
+            }
+        }
+        self.states = next;
+        let cells = CellId::ALL.map(|cell| {
+            let vote = Level::worst(
+                rules
+                    .iter()
+                    .filter(|r| r.rule.cell() == cell)
+                    .map(|r| r.level),
+            );
+            let reason = if vote >= Level::Caution {
+                rules
+                    .iter()
+                    .find(|r| r.rule.cell() == cell && r.level == vote)
+                    .map(|r| {
+                        format!(
+                            "{} {} {}{}",
+                            r.rule.label(),
+                            r.subject,
+                            r.value.expect("alert levels have a measured value"),
+                            r.rule.unit()
+                        )
+                    })
+            } else {
+                None
+            };
+            CellVote { cell, vote, reason }
+        });
+        let votes = cells.each_ref().map(|c| c.vote);
+        Evaluation {
+            rules,
+            consensus: Consensus {
+                cells,
+                verdict: Level::worst(votes),
+                agreement: Agreement::of(votes),
+            },
+            events,
+        }
+    }
+}
+
+impl RuleState {
+    fn update(
+        &mut self,
+        value: Option<f64>,
+        nominal: bool,
+        below: bool,
+        cfg: &RuleConfig,
+        sustain: u32,
+    ) {
+        let Some(value) = value else {
+            self.level = Level::Unknown;
+            self.warn_samples = 0;
+            self.crit_samples = 0;
+            return;
+        };
+        let fires = |threshold| {
+            if below {
+                value <= threshold
+            } else {
+                value >= threshold
+            }
+        };
+        let cleared = |threshold| {
+            if below {
+                value > threshold + cfg.hysteresis
+            } else {
+                value < threshold - cfg.hysteresis
+            }
+        };
+        if nominal {
+            self.level = Level::Nominal;
+            self.warn_samples = 0;
+            self.crit_samples = 0;
+            return;
+        }
+        self.warn_samples = if fires(cfg.warn) {
+            self.warn_samples.saturating_add(1)
+        } else {
+            0
+        };
+        self.crit_samples = if fires(cfg.crit) {
+            self.crit_samples.saturating_add(1)
+        } else {
+            0
+        };
+        let retained = if self.level == Level::Critical && !cleared(cfg.crit) {
+            Level::Critical
+        } else if self.level >= Level::Caution && !cleared(cfg.warn) {
+            Level::Caution
+        } else {
+            Level::Nominal
+        };
+        let raised = if self.crit_samples >= sustain {
+            Level::Critical
+        } else if self.warn_samples >= sustain {
+            Level::Caution
+        } else {
+            Level::Nominal
+        };
+        self.level = retained.max(raised);
+    }
+}
+
+type Input = (String, Option<f64>, Option<String>, bool);
+fn inputs(s: &Snapshot, rule: RuleId) -> Vec<Input> {
+    let single = |value: Option<f64>, reason: Option<&str>| {
+        vec![(
+            String::new(),
+            value,
+            value
+                .is_none()
+                .then(|| reason.unwrap_or("not reported").to_string()),
+            false,
+        )]
+    };
+    match rule {
+        RuleId::CpuUsage => single(s.cpu.value().map(|c| c.total as f64), s.cpu.reason()),
+        RuleId::Load => single(
+            s.cpu
+                .value()
+                .filter(|c| !c.per_core.is_empty())
+                .map(|c| c.load_avg[0] / c.per_core.len() as f64),
+            s.cpu.reason().or(Some("no cpu cores")),
+        ),
+        RuleId::Memory => single(
+            s.memory.value().and_then(|m| m.used_percent()),
+            s.memory.reason().or(Some("zero memory total")),
+        ),
+        RuleId::Swap => {
+            if s.memory.value().is_some_and(|m| m.swap_total_bytes == 0) {
+                vec![]
+            } else {
+                single(
+                    s.memory.value().and_then(|m| m.swap_used_percent()),
+                    s.memory.reason(),
+                )
+            }
+        }
+        RuleId::Disk => match s.disks.value() {
+            Some(disks) => {
+                let mut out: Vec<_> = disks
+                    .iter()
+                    .map(|d| {
+                        (
+                            d.mount_point.clone(),
+                            d.used_percent(),
+                            (d.total_bytes == 0).then(|| "zero disk total".into()),
+                            false,
+                        )
+                    })
+                    .collect();
+                out.sort_by(|a, b| a.0.cmp(&b.0));
+                out
+            }
+            None => single(None, s.disks.reason()),
+        },
+        RuleId::Battery => match &s.battery {
+            crate::model::Reading::Unavailable(r) if r == "no battery present" => vec![],
+            crate::model::Reading::Unavailable(r) => single(None, Some(r)),
+            crate::model::Reading::Available(b) => vec![(
+                String::new(),
+                Some(b.percent),
+                None,
+                b.status != BatteryStatus::Discharging,
+            )],
+        },
+        RuleId::CpuTemp | RuleId::StorageTemp | RuleId::GpuTemp => {
+            let kind = match rule {
+                RuleId::CpuTemp => SensorKind::Cpu,
+                RuleId::StorageTemp => SensorKind::Storage,
+                _ => SensorKind::Gpu,
+            };
+            let mut values: Vec<(String, f64)> = s
+                .sensors
+                .value()
+                .into_iter()
+                .flat_map(|s| &s.temps)
+                .filter(|t| t.kind == kind)
+                .map(|t| (format!("{} {}", t.chip, t.label), t.celsius))
+                .collect();
+            let mut reason = s.sensors.reason().unwrap_or("no matching sensors");
+            if rule == RuleId::GpuTemp {
+                reason = s.gpus.reason().unwrap_or(reason);
+                if let Some(gpus) = s.gpus.value() {
+                    for g in gpus {
+                        if g.power_state == GpuPower::Suspended {
+                            reason = "gpu suspended";
+                            continue;
+                        }
+                        if let Some(v) = g.temperature_celsius.value() {
+                            values.push((format!("{} {}", g.pci_slot, g.name), *v));
+                        } else if let Some(r) = g.temperature_celsius.reason() {
+                            reason = r;
+                        }
+                    }
+                }
+            }
+            match values
+                .into_iter()
+                .max_by(|a, b| a.1.total_cmp(&b.1).then_with(|| b.0.cmp(&a.0)))
+            {
+                Some((subject, value)) => vec![(subject, Some(value), None, false)],
+                None => single(None, Some(reason)),
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

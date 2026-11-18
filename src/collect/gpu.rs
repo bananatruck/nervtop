@@ -5,6 +5,7 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::mpsc,
     time::{Duration, Instant},
 };
 
@@ -13,6 +14,32 @@ pub trait CommandRunner: Send {
     fn run(&mut self, program: &str, args: &[&str], timeout: Duration) -> Result<String, String>;
 }
 pub struct SystemCommandRunner;
+
+/// How long a killed nvidia-smi gets to be reaped before it is handed to a
+/// background reaper. A process in uninterruptible sleep ignores SIGKILL until
+/// the kernel call returns, so this must stay bounded.
+const KILL_GRACE: Duration = Duration::from_millis(200);
+
+/// Polls `try_wait` until the child reports an exit or `grace` has passed on
+/// the `now` clock. Returns whether the child exited; never blocks for more
+/// than `grace` plus one poll step.
+fn reaped_within(
+    mut try_wait: impl FnMut() -> std::io::Result<Option<std::process::ExitStatus>>,
+    now: impl Fn() -> Instant,
+    grace: Duration,
+) -> bool {
+    let deadline = now() + grace;
+    loop {
+        if let Ok(Some(_)) = try_wait() {
+            return true;
+        }
+        if now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 impl CommandRunner for SystemCommandRunner {
     fn run(&mut self, program: &str, args: &[&str], timeout: Duration) -> Result<String, String> {
         let mut child = Command::new(program)
@@ -30,9 +57,11 @@ impl CommandRunner for SystemCommandRunner {
             })?;
         let mut stdout = child.stdout.take().ok_or("nvidia-smi stdout unavailable")?;
         // Drain concurrently so even unexpectedly large output cannot fill the pipe.
+        // The text comes back over a channel so collecting it is bounded too.
+        let (text_tx, text_rx) = mpsc::channel();
         let reader = std::thread::spawn(move || {
             let mut text = String::new();
-            stdout.read_to_string(&mut text).map(|_| text)
+            let _ = text_tx.send(stdout.read_to_string(&mut text).map(|_| text));
         });
         let start = Instant::now();
         let result: Result<(), String> = loop {
@@ -47,24 +76,31 @@ impl CommandRunner for SystemCommandRunner {
                 Ok(None) if start.elapsed() < timeout => {
                     std::thread::sleep(Duration::from_millis(10))
                 }
-                Ok(None) => {
+                outcome => {
                     let _ = child.kill();
-                    let _ = child.wait();
-                    break Err("nvidia-smi timeout".into());
-                }
-                Err(_) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    break Err("nvidia-smi wait failed".into());
+                    if !reaped_within(|| child.try_wait(), Instant::now, KILL_GRACE) {
+                        // Still not reaped (uninterruptible sleep): reap it in the
+                        // background so this sample is not blocked by it.
+                        std::thread::spawn(move || {
+                            let _ = child.wait();
+                            let _ = reader.join();
+                        });
+                    }
+                    break Err(if outcome.is_ok() {
+                        "nvidia-smi timeout".into()
+                    } else {
+                        "nvidia-smi wait failed".into()
+                    });
                 }
             }
         };
-        let output = reader
-            .join()
-            .map_err(|_| "nvidia-smi output failed".to_owned())?
-            .map_err(|_| "nvidia-smi output failed".to_owned());
         result?;
-        output
+        // The child has exited, so its stdout normally closes at once; a
+        // descendant still holding the pipe must not stall the sample either.
+        text_rx
+            .recv_timeout((start + timeout + KILL_GRACE).saturating_duration_since(Instant::now()))
+            .map_err(|_| "nvidia-smi output failed".to_owned())?
+            .map_err(|_| "nvidia-smi output failed".to_owned())
     }
 }
 
@@ -526,6 +562,30 @@ mod tests {
         }
     }
     #[test]
+    fn reaping_a_child_that_never_exits_is_bounded() {
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let polls = AtomicUsize::new(0);
+            let start = Instant::now();
+            let exited = reaped_within(
+                || {
+                    polls.fetch_add(1, Ordering::SeqCst);
+                    Ok(None)
+                },
+                Instant::now,
+                Duration::from_millis(200),
+            );
+            let _ = done.send((exited, start.elapsed(), polls.load(Ordering::SeqCst)));
+        });
+        let (exited, elapsed, polls) = finished
+            .recv_timeout(Duration::from_secs(2))
+            .expect("reaping a stuck child must not block");
+        assert!(!exited);
+        assert!(elapsed >= Duration::from_millis(200), "{elapsed:?}");
+        assert!(elapsed < Duration::from_millis(400), "{elapsed:?}");
+        assert!(polls > 1);
+    }
+    #[test]
     fn real_runner_handles_success_failure_missing_and_timeout() {
         let mut r = SystemCommandRunner;
         assert_eq!(
@@ -548,5 +608,17 @@ mod tests {
                 .unwrap_err(),
             "nvidia-smi timeout"
         );
+        // A descendant that keeps stdout open must not stall the sample.
+        let start = Instant::now();
+        assert_eq!(
+            r.run(
+                "/bin/sh",
+                &["-c", "sleep 3 & echo hi"],
+                Duration::from_millis(100)
+            )
+            .unwrap_err(),
+            "nvidia-smi output failed"
+        );
+        assert!(start.elapsed() < Duration::from_secs(1));
     }
 }

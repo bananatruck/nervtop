@@ -256,9 +256,25 @@ fn cli_size_invalid() {
 }
 #[test]
 fn cli_requires_screenshot() {
-    for s in ["--size=80x24", "--screen overview"] {
+    for s in ["--size=80x24", "--screen overview", "--samples 5"] {
         assert!(parse(s).is_err());
     }
+}
+#[test]
+fn cli_samples() {
+    assert_eq!(opts("--screenshot a.svg").samples, 4);
+    assert_eq!(opts("--screenshot a.svg --samples 60").samples, 60);
+    assert_eq!(opts("--screenshot=a.svg --samples=1").samples, 1);
+    for v in ["0", "601", "x", "-1"] {
+        assert!(
+            parse(&format!("--screenshot a --samples={v}")).is_err(),
+            "{v}"
+        );
+    }
+}
+#[test]
+fn cli_once_and_screenshot_are_exclusive() {
+    assert!(parse("--once --screenshot a.svg").is_err());
 }
 #[test]
 fn cli_requires_once() {
@@ -867,9 +883,15 @@ fn report_text_missing_and_available() {
     let s = snapshot();
     let e = AlertEngine::default().evaluate(&s, &instant());
     let out = report::text(&s, &e);
-    assert!(out.contains("kernel: unavailable (kernel missing)"));
-    assert!(out.contains("total: 10.0%"));
-    assert!(out.contains("NETWORK\nunavailable (net missing)"));
+    assert!(
+        out.contains("kernel          unavailable (kernel missing)"),
+        "{out}"
+    );
+    assert!(out.contains("total           10.0%"), "{out}");
+    assert!(
+        out.contains("network         unavailable (net missing)"),
+        "{out}"
+    );
     assert!(out.contains("CONSENSUS:"));
 }
 #[test]

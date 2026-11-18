@@ -27,9 +27,12 @@ impl Source for Battery {
         }) else {
             return Reading::unavailable("no battery present");
         };
-        // Some drivers report current_now and power_now as negative while
-        // discharging; the model carries magnitudes.
-        let n = |name: &str| number::<i64>(dir.join(name)).map(|v| (v as f64).abs());
+        // Stored energy and charge are never negative, so they parse as
+        // unsigned and a negative value is "not reported". Only the rates
+        // (current_now, power_now) are signed on some drivers while
+        // discharging; the model carries their magnitude.
+        let n = |name: &str| number::<u64>(dir.join(name)).map(|v| v as f64);
+        let rate_of = |name: &str| number::<i64>(dir.join(name)).map(|v| (v as f64).abs());
         let status = match read(dir.join("status")).as_deref() {
             Some("Charging") => BatteryStatus::Charging,
             Some("Discharging") => BatteryStatus::Discharging,
@@ -37,9 +40,9 @@ impl Source for Battery {
             Some("Not charging") => BatteryStatus::NotCharging,
             _ => BatteryStatus::Unknown,
         };
-        let power = n("power_now")
+        let power = rate_of("power_now")
             .map(|v| v / 1e6)
-            .or_else(|| Some(n("current_now")? * n("voltage_now")? / 1e12));
+            .or_else(|| Some(rate_of("current_now")? * n("voltage_now")? / 1e12));
         // Keep capacity, design capacity and rate in the same native units.
         let (now, full, design, rate) = if n("energy_now").is_some() {
             (
@@ -53,11 +56,12 @@ impl Source for Battery {
                 n("charge_now"),
                 n("charge_full"),
                 n("charge_full_design"),
-                n("current_now"),
+                rate_of("current_now"),
             )
         };
-        let Some(percent) =
-            n("capacity").or_else(|| Some(now? / full.filter(|v| *v > 0.0)? * 100.0))
+        let Some(percent) = n("capacity")
+            .filter(|c| *c <= 100.0)
+            .or_else(|| Some((now? / full.filter(|v| *v > 0.0)? * 100.0).min(100.0)))
         else {
             return Reading::unavailable("battery capacity not reported");
         };
@@ -135,6 +139,29 @@ mod tests {
         put(t.path(), "sys/class/power_supply/BAT0/type", "Battery");
         put(t.path(), "sys/class/power_supply/BAT0/capacity", "77");
         assert_eq!(b.sample().value().unwrap().name, "BAT0");
+    }
+    #[test]
+    fn capacity_must_be_a_real_percentage() {
+        // A negative capacity must not become a healthy positive one.
+        let t = tree(&[("status", "Discharging"), ("capacity", "-95")]);
+        let b = Battery::new(t.path().into()).sample();
+        assert_eq!(b.reason(), Some("battery capacity not reported"));
+        // Out of range: fall back to charge_now / charge_full.
+        let t = tree(&[
+            ("status", "Discharging"),
+            ("capacity", "101"),
+            ("charge_now", "1000"),
+            ("charge_full", "4000"),
+        ]);
+        let b = Battery::new(t.path().into()).sample();
+        assert_eq!(b.value().unwrap().percent, 25.0);
+        // Negative stored energy is not a magnitude either.
+        let t = tree(&[
+            ("status", "Discharging"),
+            ("energy_now", "-5"),
+            ("energy_full", "10"),
+        ]);
+        assert!(Battery::new(t.path().into()).sample().reason().is_some());
     }
     #[test]
     fn target_charge_units() {

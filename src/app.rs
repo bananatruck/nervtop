@@ -1,0 +1,346 @@
+//! All UI state, with no terminal code.
+//!
+//! `ui` reads an `&App` and draws it. Key handling and snapshot application
+//! live here so they can be tested without a terminal.
+
+use crate::alert::{Agreement, AlertEvent, CellId, CellVote, Consensus, Level, RuleStatus};
+use crate::config::Config;
+use crate::model::{ProcessInfo, Snapshot};
+use crate::theme::{Palette, ThemeName};
+use std::collections::{BTreeMap, VecDeque};
+
+/// Samples of history kept per series; enough for a sparkline across a 4K terminal.
+pub const HISTORY_LEN: usize = 512;
+/// Alert log entries kept.
+pub const LOG_LEN: usize = 200;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Screen {
+    Overview,
+    Processes,
+    Diagnostics,
+}
+
+impl Screen {
+    pub const ALL: [Screen; 3] = [Screen::Overview, Screen::Processes, Screen::Diagnostics];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Screen::Overview => "OVERVIEW",
+            Screen::Processes => "PROCESSES",
+            Screen::Diagnostics => "DIAGNOSTICS",
+        }
+    }
+
+    /// The number key that selects this screen.
+    pub fn key(self) -> char {
+        match self {
+            Screen::Overview => '1',
+            Screen::Processes => '2',
+            Screen::Diagnostics => '3',
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortKey {
+    Cpu,
+    Memory,
+    Pid,
+    Name,
+}
+
+impl SortKey {
+    pub fn label(self) -> &'static str {
+        match self {
+            SortKey::Cpu => "CPU",
+            SortKey::Memory => "MEM",
+            SortKey::Pid => "PID",
+            SortKey::Name => "NAME",
+        }
+    }
+
+    pub fn next(self) -> SortKey {
+        match self {
+            SortKey::Cpu => SortKey::Memory,
+            SortKey::Memory => SortKey::Pid,
+            SortKey::Pid => SortKey::Name,
+            SortKey::Name => SortKey::Cpu,
+        }
+    }
+
+    /// The natural direction: biggest first for CPU and memory, ascending for PID and name.
+    pub fn default_descending(self) -> bool {
+        matches!(self, SortKey::Cpu | SortKey::Memory)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputMode {
+    Normal,
+    /// Typing a process filter after `/`.
+    Filter,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessView {
+    pub sort: SortKey,
+    pub descending: bool,
+    pub filter: String,
+    pub mode: InputMode,
+    /// The selected process; kept across refreshes while that PID exists.
+    pub selected_pid: Option<u32>,
+    /// Index of the first visible row on the processes screen.
+    pub offset: usize,
+}
+
+impl Default for ProcessView {
+    fn default() -> Self {
+        ProcessView {
+            sort: SortKey::Cpu,
+            descending: true,
+            filter: String::new(),
+            mode: InputMode::Normal,
+            selected_pid: None,
+            offset: 0,
+        }
+    }
+}
+
+/// A bounded series of samples, oldest first.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Series {
+    values: VecDeque<f64>,
+}
+
+impl Series {
+    pub fn push(&mut self, value: f64) {
+        if self.values.len() == HISTORY_LEN {
+            self.values.pop_front();
+        }
+        self.values.push_back(value);
+    }
+
+    pub fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+
+    pub fn last(&self) -> Option<f64> {
+        self.values.back().copied()
+    }
+
+    /// The newest `n` samples, oldest first.
+    pub fn tail(&self, n: usize) -> impl Iterator<Item = f64> + '_ {
+        self.values
+            .iter()
+            .skip(self.values.len().saturating_sub(n))
+            .copied()
+    }
+
+    pub fn max(&self) -> Option<f64> {
+        self.values.iter().copied().reduce(f64::max)
+    }
+}
+
+/// History for sparklines. A series only receives a sample when its source was available.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct History {
+    pub cpu_total: Series,
+    pub memory_percent: Series,
+    /// Sum over all non-loopback interfaces, bytes per second.
+    pub net_rx_bps: Series,
+    pub net_tx_bps: Series,
+    /// Sum over all listed disks, bytes per second.
+    pub disk_read_bps: Series,
+    pub disk_write_bps: Series,
+    /// GPU utilisation keyed by PCI slot.
+    pub gpu_util: BTreeMap<String, Series>,
+}
+
+#[derive(Debug, Clone)]
+pub struct App {
+    pub config: Config,
+    pub theme: ThemeName,
+    pub palette: Palette,
+    pub snapshot: Option<Snapshot>,
+    pub history: History,
+    pub screen: Screen,
+    pub show_help: bool,
+    pub paused: bool,
+    pub interval_ms: u64,
+    pub procs: ProcessView,
+    /// Every rule status from the latest evaluation, in `RuleId::ALL` order.
+    pub rules: Vec<RuleStatus>,
+    pub consensus: Consensus,
+    /// Newest last.
+    pub log: VecDeque<AlertEvent>,
+    /// True after `a` until a rule rises to a new, higher level.
+    pub acknowledged: bool,
+    pub should_quit: bool,
+}
+
+impl App {
+    /// A fresh app with no data yet. `palette` must be the config's palette,
+    /// already validated by `Config::validate`.
+    pub fn new(config: Config, palette: Palette) -> App {
+        App {
+            theme: config.theme.name,
+            interval_ms: config.general.interval_ms,
+            palette,
+            config,
+            snapshot: None,
+            history: History::default(),
+            screen: Screen::Overview,
+            show_help: false,
+            paused: false,
+            procs: ProcessView::default(),
+            rules: Vec::new(),
+            consensus: Consensus::unknown(),
+            log: VecDeque::new(),
+            acknowledged: false,
+            should_quit: false,
+        }
+    }
+
+    /// Processes after the kernel-thread setting and the name filter, in the
+    /// current sort order. Ties break by PID so the order is stable.
+    pub fn visible_processes(&self) -> Vec<&ProcessInfo> {
+        let Some(list) = self.snapshot.as_ref().and_then(|s| s.processes.value()) else {
+            return Vec::new();
+        };
+        let needle = self.procs.filter.to_lowercase();
+        let hide_kernel = self.config.general.hide_kernel_threads;
+        let mut out: Vec<&ProcessInfo> = list
+            .iter()
+            .filter(|p| !(hide_kernel && p.kernel_thread))
+            .filter(|p| needle.is_empty() || p.name.to_lowercase().contains(&needle))
+            .collect();
+        let key = self.procs.sort;
+        out.sort_by(|a, b| {
+            let ord = match key {
+                SortKey::Cpu => a.cpu_percent.total_cmp(&b.cpu_percent),
+                SortKey::Memory => a.memory_bytes.cmp(&b.memory_bytes),
+                SortKey::Pid => a.pid.cmp(&b.pid),
+                SortKey::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+            };
+            let ord = if self.procs.descending {
+                ord.reverse()
+            } else {
+                ord
+            };
+            ord.then(a.pid.cmp(&b.pid))
+        });
+        out
+    }
+
+    /// The worst current rule level, for the banner.
+    pub fn worst_level(&self) -> Level {
+        self.consensus.verdict
+    }
+}
+
+impl Consensus {
+    /// The consensus before any data exists: every cell has no data.
+    pub fn unknown() -> Consensus {
+        Consensus {
+            cells: CellId::ALL.map(|cell| CellVote {
+                cell,
+                vote: Level::Unknown,
+                reason: None,
+            }),
+            verdict: Level::Unknown,
+            agreement: Agreement::Unanimous,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::*;
+
+    fn proc(pid: u32, name: &str, cpu: f32, mem: u64, kernel: bool) -> ProcessInfo {
+        ProcessInfo {
+            pid,
+            name: name.into(),
+            user: "u".into(),
+            cpu_percent: cpu,
+            memory_bytes: mem,
+            state: "sleep".into(),
+            kernel_thread: kernel,
+        }
+    }
+
+    fn app_with(procs: Vec<ProcessInfo>) -> App {
+        let config = Config::default();
+        let palette = config.palette().unwrap();
+        let mut app = App::new(config, palette);
+        app.snapshot = Some(Snapshot {
+            taken_at_ms: 0,
+            seq: 1,
+            host: HostInfo {
+                hostname: Reading::Available("h".into()),
+                kernel: Reading::Available("k".into()),
+                uptime_secs: Reading::Available(1),
+            },
+            cpu: Reading::unavailable("warming up"),
+            memory: Reading::unavailable("x"),
+            disks: Reading::unavailable("x"),
+            network: Reading::unavailable("x"),
+            processes: Reading::Available(procs),
+            sensors: Reading::unavailable("x"),
+            gpus: Reading::unavailable("x"),
+            battery: Reading::unavailable("x"),
+        });
+        app
+    }
+
+    #[test]
+    fn visible_processes_sort_filter_and_hide_kernel_threads() {
+        let mut app = app_with(vec![
+            proc(10, "cargo", 50.0, 10, false),
+            proc(2, "kworker/0:1", 90.0, 0, true),
+            proc(7, "Firefox", 50.0, 900, false),
+            proc(3, "zsh", 1.0, 5, false),
+        ]);
+        let pids = |a: &App| {
+            a.visible_processes()
+                .iter()
+                .map(|p| p.pid)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(pids(&app), vec![7, 10, 3], "cpu desc, ties by pid");
+        app.procs.sort = SortKey::Name;
+        app.procs.descending = false;
+        assert_eq!(pids(&app), vec![10, 7, 3], "case-insensitive name order");
+        app.procs.filter = "FIRE".into();
+        assert_eq!(pids(&app), vec![7]);
+        app.procs.filter.clear();
+        app.config.general.hide_kernel_threads = false;
+        app.procs.sort = SortKey::Pid;
+        assert_eq!(pids(&app), vec![2, 3, 7, 10]);
+    }
+
+    #[test]
+    fn series_is_bounded_and_tail_is_oldest_first() {
+        let mut s = Series::default();
+        for i in 0..(HISTORY_LEN + 5) {
+            s.push(i as f64);
+        }
+        assert_eq!(s.len(), HISTORY_LEN);
+        assert_eq!(s.last(), Some((HISTORY_LEN + 4) as f64));
+        let t: Vec<f64> = s.tail(3).collect();
+        assert_eq!(
+            t,
+            vec![
+                (HISTORY_LEN + 2) as f64,
+                (HISTORY_LEN + 3) as f64,
+                (HISTORY_LEN + 4) as f64
+            ]
+        );
+    }
+}

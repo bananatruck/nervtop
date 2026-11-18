@@ -1,0 +1,29 @@
+[package]
+name = "nervtop"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "A command-center terminal system monitor for Linux laptops: CPU, memory, GPU, thermals, storage, network, power and processes with consensus alert states."
+license = "MIT"
+repository = "https://github.com/bananatruck/nervtop"
+readme = "README.md"
+keywords = ["tui", "system-monitor", "ratatui", "linux", "terminal"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+ratatui = { version = "0.30", default-features = false, features = ["crossterm", "layout-cache"] }
+crossterm = "0.29"
+sysinfo = { version = "0.40", default-features = false, features = ["system", "disk", "network", "user"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1"
+signal-hook = "0.3"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "unwind"

@@ -1,0 +1,101 @@
+# nervtop configuration
+#
+# Location: $XDG_CONFIG_HOME/nervtop/config.toml (usually ~/.config/nervtop/config.toml),
+# or any path passed with --config. Every key is optional; a missing key keeps
+# the default shown here. Unknown keys are reported as errors.
+
+[general]
+# Milliseconds between samples, 250 to 10000. Change it live with + and -.
+interval_ms = 1000
+# Hide kernel threads (processes without a command line) from process lists.
+hide_kernel_threads = true
+
+[theme]
+# Built-in theme: "nerv" (24-bit amber on charcoal green), "phosphor" (green
+# monochrome CRT) or "ansi" (16 terminal colours, follows your terminal scheme).
+# Cycle themes live with t.
+name = "nerv"
+
+# Override any colour slot of the chosen theme with "#rrggbb", an ANSI colour
+# name (black, red, green, yellow, blue, magenta, cyan, gray, darkgray,
+# lightred, lightgreen, lightyellow, lightblue, lightmagenta, lightcyan, white)
+# or "reset" (the terminal default; background = "reset" keeps terminal
+# transparency). Slots: background, surface, border, text, muted, accent,
+# heading, nominal, caution, alert, unknown, stripe_dark.
+[theme.colors]
+# accent = "#ef7b36"
+# background = "reset"
+
+# Alert rules. Each rule has:
+#   enabled     false turns the rule off
+#   warn        threshold for CAUTION
+#   crit        threshold for CRITICAL
+#   hysteresis  how far the value must move back past a threshold to clear it
+# Rules fire when the value is at or above the threshold, except battery,
+# which fires at or below it (and only while discharging).
+[alerts]
+# Consecutive samples a condition must hold before the alert level rises, 1 to 60.
+sustain = 3
+
+# Total CPU usage, percent.
+[alerts.cpu_usage]
+enabled = true
+warn = 85.0
+crit = 95.0
+hysteresis = 2.0
+
+# One-minute load average divided by the number of logical cores.
+[alerts.load]
+enabled = true
+warn = 1.5
+crit = 3.0
+hysteresis = 0.1
+
+# Hottest CPU package sensor (k10temp, coretemp, zenpower), degrees Celsius.
+[alerts.cpu_temp]
+enabled = true
+warn = 85.0
+crit = 95.0
+hysteresis = 3.0
+
+# Hottest GPU temperature, degrees Celsius.
+[alerts.gpu_temp]
+enabled = true
+warn = 80.0
+crit = 90.0
+hysteresis = 3.0
+
+# RAM in use (total minus available), percent.
+[alerts.memory]
+enabled = true
+warn = 85.0
+crit = 95.0
+hysteresis = 2.0
+
+# Swap in use, percent. Ignored when no swap is configured.
+[alerts.swap]
+enabled = true
+warn = 60.0
+crit = 90.0
+hysteresis = 2.0
+
+# Space used on each mounted filesystem, percent.
+[alerts.disk]
+enabled = true
+warn = 90.0
+crit = 95.0
+hysteresis = 1.0
+
+# NVMe and drive temperatures, degrees Celsius.
+[alerts.storage_temp]
+enabled = true
+warn = 65.0
+crit = 75.0
+hysteresis = 3.0
+
+# Battery charge while discharging, percent. Fires at or below the threshold.
+[alerts.battery]
+enabled = true
+warn = 20.0
+crit = 10.0
+hysteresis = 2.0

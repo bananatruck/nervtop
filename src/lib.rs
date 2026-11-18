@@ -10,5 +10,6 @@ pub mod config;
 pub mod model;
 pub mod format;
 pub mod report;
+pub mod runtime;
 pub mod theme;
 pub mod ui;

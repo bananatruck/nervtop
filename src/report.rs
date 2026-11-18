@@ -12,8 +12,8 @@ use std::{fmt::Write, thread, time::Duration};
 /// Processes listed in the text report, busiest first.
 pub const REPORT_PROCESSES: usize = 15;
 
-/// Samples twice for warm-up, then once more after `interval_ms`, and judges
-/// the last sample.
+/// Takes a warm-up sample, a baseline sample 250 ms later, and the reported
+/// sample one full `interval_ms` after the baseline, and judges it.
 ///
 /// A one-shot report has no history, so alert levels are instantaneous:
 /// `sustain` is treated as 1 here. The live monitor applies the configured
@@ -26,10 +26,8 @@ pub fn once(
     collector.sample();
     thread::sleep(Duration::from_millis(250));
     collector.sample();
-    let remainder = interval_ms.saturating_sub(250);
-    if remainder > 0 {
-        thread::sleep(Duration::from_millis(remainder));
-    }
+    // Rates and CPU usage in the reported sample cover one full interval.
+    thread::sleep(Duration::from_millis(interval_ms));
     let snapshot = collector.sample();
     let instant = AlertConfig {
         sustain: 1,
@@ -56,7 +54,8 @@ fn heading(out: &mut String, name: &str) {
 }
 
 fn field(out: &mut String, key: &str, value: impl AsRef<str>) {
-    let _ = writeln!(out, "  {key:<16}{}", value.as_ref());
+    // At least one space even when the key is longer than the column.
+    let _ = writeln!(out, "  {key:<15} {}", value.as_ref());
 }
 
 fn celsius(v: f64) -> String {
@@ -422,6 +421,26 @@ mod tests {
         assert!(
             text.contains("CRITICAL  DISK /: 97.0%, warn 90.0%, crit 95.0%"),
             "{text}"
+        );
+    }
+
+    #[test]
+    fn long_keys_stay_separated_from_values() {
+        let mut out = String::new();
+        field(&mut out, "mt7921_phy0 temp1", "50.0 °C");
+        assert_eq!(out, "  mt7921_phy0 temp1 50.0 °C\n");
+    }
+
+    #[test]
+    fn reported_sample_is_a_full_interval_after_the_baseline() {
+        let mut collector = Collector::new(fake::sources_with(fake::sample_snapshot()));
+        let started = std::time::Instant::now();
+        once(&mut collector, 250, &AlertConfig::default());
+        // 250 ms warm-up to baseline, then one full 250 ms interval.
+        assert!(
+            started.elapsed() >= Duration::from_millis(500),
+            "{:?}",
+            started.elapsed()
         );
     }
 

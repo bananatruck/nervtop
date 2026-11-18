@@ -239,16 +239,27 @@ impl Source for Gpus {
     type Output = Vec<GpuStats>;
     fn sample(&mut self) -> Reading<Self::Output> {
         let mut out = Vec::new();
-        for dir in entries(self.root.join("sys/bus/pci/devices")) {
-            if !read(dir.join("class")).is_some_and(|c| c.starts_with("0x03")) {
-                continue;
-            }
-            let hex = |file: &str| {
-                read(dir.join(file))
-                    .and_then(|v| u16::from_str_radix(v.trim_start_matches("0x"), 16).ok())
-            };
-            let vendor_id = hex("vendor");
-            let device_id = hex("device");
+        // Read every display adapter's IDs and runtime PM status once, before
+        // deciding anything: `nvidia-smi --query-gpu` touches every NVIDIA
+        // device, so one asleep NVIDIA adapter rules out the query for all.
+        let adapters: Vec<_> = entries(self.root.join("sys/bus/pci/devices"))
+            .into_iter()
+            .filter(|dir| read(dir.join("class")).is_some_and(|c| c.starts_with("0x03")))
+            .map(|dir| {
+                let hex = |file: &str| {
+                    read(dir.join(file))
+                        .and_then(|v| u16::from_str_radix(v.trim_start_matches("0x"), 16).ok())
+                };
+                let ids = (hex("vendor"), hex("device"));
+                let runtime = read(dir.join("power/runtime_status"));
+                (dir, ids, runtime)
+            })
+            .collect();
+        let nvidia_asleep = adapters.iter().any(|(_, (vendor, _), runtime)| {
+            *vendor == Some(0x10de)
+                && matches!(runtime.as_deref(), Some("suspended" | "suspending"))
+        });
+        for (dir, (vendor_id, device_id), runtime) in adapters {
             let (vendor, label) = match vendor_id {
                 Some(0x1002) => (GpuVendor::Amd, "AMD"),
                 Some(0x10de) => (GpuVendor::Nvidia, "NVIDIA"),
@@ -277,7 +288,6 @@ impl Source for Gpus {
                 .unwrap_or_default()
                 .to_string_lossy()
                 .into_owned();
-            let runtime = read(dir.join("power/runtime_status"));
             if matches!(runtime.as_deref(), Some("suspended" | "suspending")) {
                 out.push(unavailable(
                     slot,
@@ -296,9 +306,18 @@ impl Source for Gpus {
                 "gpu metrics not supported",
             );
             match vendor {
-                // Only a suspended device is left alone. "active", "resuming",
-                // "unsupported" (runtime PM disabled, so always powered) and a
-                // missing status file all mean the GPU is already awake.
+                GpuVendor::Nvidia if nvidia_asleep => {
+                    gpu = unavailable(
+                        slot,
+                        vendor,
+                        gpu.name,
+                        GpuPower::Active,
+                        "not queried: another nvidia gpu is asleep",
+                    );
+                }
+                // "active", "resuming", "unsupported" (runtime PM disabled, so
+                // always powered) and a missing status file all mean the GPU
+                // is already awake.
                 GpuVendor::Nvidia => {
                     self.query();
                     match &self.cached {
@@ -539,6 +558,25 @@ mod tests {
                 Some(reason)
             );
         }
+    }
+    #[test]
+    fn asleep_nvidia_gpu_stops_every_nvidia_query() {
+        let t = tempfile::tempdir().unwrap();
+        device(t.path(), "0000:01:00.0", "0x10de", "0x28e0", "active");
+        device(t.path(), "0000:02:00.0", "0x10de", "0x28e0", "suspended");
+        let (mut g, calls) = source(t.path(), Ok(CSV.into()));
+        let reading = g.sample();
+        let rows = reading.value().unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(rows[0].power_state, GpuPower::Active);
+        let reason = Some("not queried: another nvidia gpu is asleep");
+        assert_eq!(rows[0].utilization_percent.reason(), reason);
+        assert_eq!(rows[0].memory_used_bytes.reason(), reason);
+        assert_eq!(rows[0].memory_total_bytes.reason(), reason);
+        assert_eq!(rows[0].temperature_celsius.reason(), reason);
+        assert_eq!(rows[0].power_watts.reason(), reason);
+        assert_eq!(rows[1].power_state, GpuPower::Suspended);
+        assert_eq!(rows[1].power_watts.reason(), Some("gpu suspended"));
     }
     #[test]
     fn awake_nvidia_gpu_is_queried_whatever_its_runtime_pm_state() {

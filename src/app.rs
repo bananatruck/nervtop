@@ -177,6 +177,8 @@ pub struct App {
     pub paused: bool,
     pub interval_ms: u64,
     pub procs: ProcessView,
+    /// Shared row offset for diagnostics tables; each table clamps to its final page.
+    pub diagnostics_offset: usize,
     /// Every rule status from the latest evaluation, in `RuleId::ALL` order.
     pub rules: Vec<RuleStatus>,
     pub consensus: Consensus,
@@ -207,6 +209,7 @@ impl App {
             show_help: false,
             paused: false,
             procs: ProcessView::default(),
+            diagnostics_offset: 0,
             rules: Vec::new(),
             consensus: Consensus::unknown(),
             log: VecDeque::new(),
@@ -214,6 +217,25 @@ impl App {
             should_quit: false,
             utc_offset_secs: None,
         }
+    }
+
+    /// Number of rows in the longest diagnostics table.
+    pub fn diagnostics_len(&self) -> usize {
+        let mut lengths = vec![
+            self.rules.len().max(crate::alert::RuleId::ALL.len()),
+            self.log.len(),
+        ];
+        if let Some(s) = &self.snapshot {
+            lengths.extend([
+                s.sensors
+                    .value()
+                    .map_or(1, |s| s.temps.len() + s.fans.len()),
+                s.gpus.value().map_or(1, Vec::len),
+                if s.battery.is_available() { 8 } else { 1 },
+                s.disks.value().map_or(1, Vec::len) + s.network.value().map_or(1, Vec::len),
+            ]);
+        }
+        lengths.into_iter().max().unwrap_or(0)
     }
 
     /// Processes after the kernel-thread setting and the name filter, in the
@@ -336,6 +358,9 @@ impl App {
         }
         self.utc_offset_secs = crate::clock::local_offset_secs((s.taken_at_ms / 1000) as i64);
         self.snapshot = Some(s);
+        self.diagnostics_offset = self
+            .diagnostics_offset
+            .min(self.diagnostics_len().saturating_sub(1));
         self.clamp_selection(old_index);
     }
 
@@ -377,6 +402,7 @@ impl App {
             self.screen,
             self.show_help,
             self.procs.clone(),
+            self.diagnostics_offset,
             self.acknowledged,
             self.theme,
         );
@@ -385,6 +411,7 @@ impl App {
             self.screen,
             self.show_help,
             self.procs.clone(),
+            self.diagnostics_offset,
             self.acknowledged,
             self.theme,
         );
@@ -500,6 +527,24 @@ impl App {
                 // A filter kept with Enter stays until Esc clears it.
                 self.procs.filter.clear();
                 self.clamp_selection(0);
+            }
+            K::Char('j' | 'k' | 'g' | 'G') | K::Down | K::Up | K::PageDown | K::PageUp
+                if self.screen == Screen::Diagnostics =>
+            {
+                let last = self.diagnostics_len().saturating_sub(1);
+                self.diagnostics_offset = match key.code {
+                    K::Char('j') | K::Down => self.diagnostics_offset.saturating_add(1),
+                    K::Char('k') | K::Up => self.diagnostics_offset.saturating_sub(1),
+                    K::PageDown => self
+                        .diagnostics_offset
+                        .saturating_add(self.page_size.max(1)),
+                    K::PageUp => self
+                        .diagnostics_offset
+                        .saturating_sub(self.page_size.max(1)),
+                    K::Char('g') => 0,
+                    _ => last,
+                }
+                .min(last);
             }
             K::Char('j' | 'k' | 'g' | 'G') | K::Down | K::Up | K::PageDown | K::PageUp => {
                 let len = self.visible_processes().len();

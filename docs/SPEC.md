@@ -41,7 +41,11 @@ The selection is kept on the same PID across refreshes when that process still e
 ### 3 DIAGNOSTICS
 
 Every temperature sensor and fan, every GPU field, the full battery record, every disk and interface, the alert rule table with current values and thresholds, and the alert event log with timestamps.
-This screen exists so that readings the overview leaves out for space can be inspected; it shows as many rows as the terminal fits and has no scrolling, and `--once` lists every reading.
+Use `j`, `k`, or the arrow keys to scroll the diagnostics tables together.
+Each shorter table stops at its last page.
+`PgUp` and `PgDn` move by a page, and `g` and `G` go to the first and last rows.
+The scroll position persists across redraws and screen changes.
+`--once` also lists every reading.
 
 ### Overlays and small terminals
 
@@ -62,8 +66,8 @@ Below 80 columns or 24 rows nervtop draws a single centered message that states 
 | `s` | Cycle the process sort key: CPU, memory, PID, name |
 | `r` | Reverse the sort order |
 | `/` | Start a process name filter; `Enter` keeps it, `Esc` clears it (also after it was kept) |
-| `j`, `k`, arrows | Move the process selection |
-| `PgUp`, `PgDn`, `g`, `G` | Page, top and bottom of the process list |
+| `j`, `k`, arrows | Move the process selection or scroll diagnostics |
+| `PgUp`, `PgDn`, `g`, `G` | Page, top and bottom of processes or diagnostics |
 | `a` | Acknowledge current alerts, which removes the banner's warning stripes until a rule rises to a higher level |
 
 ## Data sources and fallbacks

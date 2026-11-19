@@ -87,8 +87,8 @@ Below 80x24 nervtop shows the current size and the minimum, and keeps sampling s
 | `s` | Cycle the process sort: CPU, memory, PID, name |
 | `r` | Reverse the sort |
 | `/` | Filter processes by name; `Enter` keeps the filter, `Esc` clears it |
-| `j`, `k`, arrows | Move the process selection |
-| `PgUp`, `PgDn`, `g`, `G` | Page up, page down, top, bottom |
+| `j`, `k`, arrows | Move the process selection or scroll diagnostics |
+| `PgUp`, `PgDn`, `g`, `G` | Page up, page down, top, bottom of processes or diagnostics |
 | `a` | Acknowledge alerts: the banner drops its warning stripes and keeps only its label until a rule rises to a higher level |
 
 While the help overlay is open, the next key only closes it.

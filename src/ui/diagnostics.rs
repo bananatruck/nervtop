@@ -13,6 +13,18 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Cell, Paragraph, Row, Table};
 
+/// Keep each table on its last full page when the shared offset exceeds its length.
+fn visible_rows(
+    rows: Vec<Row<'static>>,
+    inner: Rect,
+    header: bool,
+    offset: usize,
+) -> Vec<Row<'static>> {
+    let capacity = inner.height.saturating_sub(u16::from(header)) as usize;
+    let offset = offset.min(rows.len().saturating_sub(capacity));
+    rows.into_iter().skip(offset).collect()
+}
+
 /// Draws the DIAGNOSTICS screen using `Table` widgets for all subsystems.
 pub fn draw_diagnostics(frame: &mut Frame, area: Rect, app: &App) {
     if area.width == 0 || area.height == 0 {
@@ -210,7 +222,11 @@ fn draw_sensors_table(frame: &mut Frame, area: Rect, app: &App) {
         })
         .collect();
 
-    let mut table = Table::new(rows, constraints).column_spacing(1);
+    let mut table = Table::new(
+        visible_rows(rows, inner, inner.height >= 2, app.diagnostics_offset),
+        constraints,
+    )
+    .column_spacing(1);
     if inner.height >= 2 {
         let hdr_cells: Vec<&str> = col_indices.iter().map(|&i| headers[i]).collect();
         table = table.header(
@@ -367,7 +383,11 @@ fn draw_gpus_table(frame: &mut Frame, area: Rect, app: &App) {
         })
         .collect();
 
-    let mut table = Table::new(rows, constraints).column_spacing(1);
+    let mut table = Table::new(
+        visible_rows(rows, inner, inner.height >= 2, app.diagnostics_offset),
+        constraints,
+    )
+    .column_spacing(1);
     if inner.height >= 2 {
         let hdr_cells: Vec<&str> = chosen.iter().map(|&i| headers[i]).collect();
         table = table.header(
@@ -483,7 +503,11 @@ fn draw_battery_table(frame: &mut Frame, area: Rect, app: &App) {
     ];
 
     let widths = [Constraint::Length(10), Constraint::Min(15)];
-    let table = Table::new(rows, widths).column_spacing(1);
+    let table = Table::new(
+        visible_rows(rows, inner, false, app.diagnostics_offset),
+        widths,
+    )
+    .column_spacing(1);
     frame.render_widget(table, inner);
 }
 
@@ -606,7 +630,14 @@ fn draw_io_table(frame: &mut Frame, area: Rect, app: &App) {
             Constraint::Length(col_w[1] as u16),
             Constraint::Length(col_w[2] as u16),
         ];
-        frame.render_widget(Table::new(rows, widths).column_spacing(1), inner);
+        frame.render_widget(
+            Table::new(
+                visible_rows(rows, inner, false, app.diagnostics_offset),
+                widths,
+            )
+            .column_spacing(1),
+            inner,
+        );
     } else {
         let rows: Vec<Row<'static>> = raw_rows
             .into_iter()
@@ -618,7 +649,14 @@ fn draw_io_table(frame: &mut Frame, area: Rect, app: &App) {
             })
             .collect();
         let widths = [Constraint::Fill(1), Constraint::Length(col_w[1] as u16)];
-        frame.render_widget(Table::new(rows, widths).column_spacing(1), inner);
+        frame.render_widget(
+            Table::new(
+                visible_rows(rows, inner, false, app.diagnostics_offset),
+                widths,
+            )
+            .column_spacing(1),
+            inner,
+        );
     }
 }
 
@@ -703,7 +741,16 @@ fn draw_rules_table(frame: &mut Frame, area: Rect, app: &App) {
         Constraint::Length(max_level_len),
     ];
 
-    let mut table = Table::new(rows, widths).column_spacing(1);
+    let mut table = Table::new(
+        visible_rows(
+            rows,
+            inner,
+            inner.height as usize > rules_slice.len(),
+            app.diagnostics_offset,
+        ),
+        widths,
+    )
+    .column_spacing(1);
     if inner.height as usize > rules_slice.len() {
         table = table.header(
             Row::new(vec!["RULE", "LABEL", "VALUE", "WARN", "CRIT", "LEVEL"])
@@ -785,7 +832,11 @@ fn draw_events_table(frame: &mut Frame, area: Rect, app: &App) {
         })
         .collect();
 
-    let mut table = Table::new(rows, widths).column_spacing(1);
+    let mut table = Table::new(
+        visible_rows(rows, inner, inner.height >= 4, app.diagnostics_offset),
+        widths,
+    )
+    .column_spacing(1);
     if inner.height >= 4 {
         table = table.header(
             Row::new(vec!["TIME", "RULE", "TRANSITION", "VALUE"])
@@ -870,6 +921,72 @@ mod tests {
         assert!(
             row.contains("280.0 GiB/500.0 GiB"),
             "capacity column lost: {row:?}"
+        );
+    }
+    #[test]
+    fn diagnostics_navigation_reaches_overflow_rows_and_preserves_process_selection() {
+        use crate::model::TempSensor;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut app = nominal_app();
+        app.screen = Screen::Diagnostics;
+        let selected_pid = app.procs.selected_pid;
+        let snap = app.snapshot.as_mut().unwrap();
+        let sensors = match &mut snap.sensors {
+            Reading::Available(s) => s,
+            _ => unreachable!(),
+        };
+        let template: TempSensor = sensors.temps[0].clone();
+        sensors.temps = (0..15)
+            .map(|i| TempSensor {
+                chip: "probe".into(),
+                label: format!("{i:02}"),
+                ..template.clone()
+            })
+            .collect();
+        sensors.fans.clear();
+        let disk_template = snap.disks.value().unwrap()[0].clone();
+        snap.disks = Reading::Available(
+            (0..6)
+                .map(|i| crate::model::DiskStats {
+                    mount_point: format!("/disk{i}"),
+                    ..disk_template.clone()
+                })
+                .collect(),
+        );
+        let initial = buffer_lines(&render(&app, 80, 24)).join("\n");
+        assert!(initial.contains("probe:00"));
+        assert!(!initial.contains("probe:14"));
+        let mut seen = initial;
+        for _ in 0..25 {
+            app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+            seen.push_str(&buffer_lines(&render(&app, 80, 24)).join("\n"));
+        }
+        for i in 0..15 {
+            assert!(
+                seen.contains(&format!("probe:{i:02}")),
+                "sensor {i} unreachable"
+            );
+        }
+        for i in 0..6 {
+            assert!(seen.contains(&format!("/disk{i}")), "disk {i} unreachable");
+        }
+        assert!(
+            seen.contains("wlan0"),
+            "network rows unreachable after disks"
+        );
+        assert!(seen.contains("CYCLES"), "battery rows unreachable");
+        assert_eq!(app.procs.selected_pid, selected_pid);
+        app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        assert!(
+            buffer_lines(&render(&app, 80, 24))
+                .join("\n")
+                .contains("probe:00")
+        );
+        app.handle_key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE));
+        assert!(
+            buffer_lines(&render(&app, 80, 24))
+                .join("\n")
+                .contains("probe:14")
         );
     }
 }

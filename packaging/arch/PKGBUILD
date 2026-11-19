@@ -1,6 +1,6 @@
 # Maintainer: bananatruck <https://github.com/bananatruck>
 pkgname=nervtop
-pkgver=0.1.1
+pkgver=0.1.2
 pkgrel=1
 pkgdesc='Command-center terminal system monitor for Linux laptops'
 arch=('x86_64')
@@ -13,7 +13,7 @@ optdepends=(
   'hwdata: GPU model names'
 )
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('8325b66cdad6091af9ac2c00191c9aee9f12f366bc993bf01d12493ab1978ea7')
+sha256sums=('c534f7581c9c26d6653c1ad491f19050c41b622c9c843dd1bb5dcacb645403a9')
 
 prepare() {
   cd "$pkgname-$pkgver"

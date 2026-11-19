@@ -378,6 +378,14 @@ impl App {
     }
 
     fn clamp_selection(&mut self, fallback: usize) {
+        // Missing data does not establish that the selected process exited.
+        if self
+            .snapshot
+            .as_ref()
+            .is_some_and(|s| !s.processes.is_available())
+        {
+            return;
+        }
         let list = self.visible_processes();
         let len = list.len();
         let index = list
@@ -547,6 +555,13 @@ impl App {
                 .min(last);
             }
             K::Char('j' | 'k' | 'g' | 'G') | K::Down | K::Up | K::PageDown | K::PageUp => {
+                if self
+                    .snapshot
+                    .as_ref()
+                    .is_some_and(|s| !s.processes.is_available())
+                {
+                    return Effect::None;
+                }
                 let len = self.visible_processes().len();
                 let i = self.selected_index();
                 let index = match key.code {

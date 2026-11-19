@@ -1196,3 +1196,22 @@ fn a_pause_restarts_pending_sustain() {
     let cpu = a.rules.iter().find(|r| r.rule == RuleId::CpuUsage).unwrap();
     assert_eq!(cpu.level, Level::Critical);
 }
+
+#[test]
+fn unavailable_process_scan_keeps_selection_until_a_successful_scan() {
+    let mut a = app();
+    a.apply_snapshot(processes(&[1, 2, 3]));
+    key(&mut a, K::Char('G'));
+    let selected = a.procs.selected_pid;
+    let mut failed = snapshot();
+    failed.processes = Reading::unavailable("process scan failed");
+    a.apply_snapshot(failed);
+    assert_eq!(a.procs.selected_pid, selected);
+    a.set_page_size(1);
+    key(&mut a, K::Down);
+    assert_eq!(a.procs.selected_pid, selected);
+    a.apply_snapshot(processes(&[1, 2, 3]));
+    assert_eq!(a.procs.selected_pid, selected);
+    a.apply_snapshot(processes(&[]));
+    assert_eq!(a.procs.selected_pid, None);
+}

@@ -4,21 +4,90 @@ use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
 };
-use sysinfo::DiskRefreshKind;
+
+/// Total and available bytes of the filesystem mounted at a path.
+type SpaceFn = dyn FnMut(&Path) -> Option<(u64, u64)> + Send;
+
 pub struct Disks {
-    disks: Option<sysinfo::Disks>,
     root: PathBuf,
     rates: Rates,
+    space: Box<SpaceFn>,
 }
 impl Disks {
     pub fn new(root: PathBuf) -> Self {
+        Self::with_space(root, statvfs_space)
+    }
+    /// Uses `space` instead of statvfs(3), so tests can see which mounts are queried.
+    pub fn with_space(
+        root: PathBuf,
+        space: impl FnMut(&Path) -> Option<(u64, u64)> + Send + 'static,
+    ) -> Self {
         Self {
-            disks: sysinfo::Disks::new().ok(),
             root,
             rates: Rates::default(),
+            space: Box::new(space),
         }
     }
 }
+
+/// statvfs(3) on `path`: total and available-to-users bytes.
+fn statvfs_space(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    // SAFETY: `c` is a valid NUL-terminated path and `st` is plain data that
+    // statvfs fills in completely when it returns 0.
+    let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(c.as_ptr(), &mut st) } != 0 {
+        return None;
+    }
+    let unit = st.f_frsize as u64;
+    Some((
+        (st.f_blocks as u64).checked_mul(unit)?,
+        (st.f_bavail as u64).checked_mul(unit)?,
+    ))
+}
+
+/// Decodes the octal escapes `/proc/self/mounts` uses for spaces, tabs,
+/// newlines and backslashes in paths.
+fn unescape_mount(field: &str) -> String {
+    let bytes = field.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\'
+            && i + 3 < bytes.len()
+            && bytes[i + 1..i + 4]
+                .iter()
+                .all(|b| (b'0'..=b'7').contains(b))
+        {
+            let v = (bytes[i + 1] - b'0') as u32 * 64
+                + (bytes[i + 2] - b'0') as u32 * 8
+                + (bytes[i + 3] - b'0') as u32;
+            if let Ok(b) = u8::try_from(v) {
+                out.push(b);
+                i += 4;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// `(device, mount point, filesystem type)` for each line of a mounts table.
+fn parse_mounts(text: &str) -> Vec<(String, String, String)> {
+    text.lines()
+        .filter_map(|line| {
+            let mut f = line.split_whitespace();
+            let device = unescape_mount(f.next()?);
+            let mount = unescape_mount(f.next()?);
+            let fs = f.next()?.to_owned();
+            Some((device, mount, fs))
+        })
+        .collect()
+}
+
 // Linux iostats: sectors read/written are stats 3/7 after the name,
 // hence columns 6/10 in /proc/diskstats including major, minor and name.
 // https://docs.kernel.org/admin-guide/iostats.html
@@ -43,53 +112,57 @@ fn device_name(root: &Path, device: &Path) -> Option<String> {
 impl Source for Disks {
     type Output = Vec<DiskStats>;
     fn sample(&mut self) -> Reading<Self::Output> {
-        let Some(disks) = &mut self.disks else {
-            return Reading::unavailable("disk initialization failed");
+        let Some(mounts) = read(self.root.join("proc/self/mounts")) else {
+            return Reading::unavailable("mount table not readable");
         };
-        disks.refresh_specifics(true, DiskRefreshKind::nothing().with_storage());
         let counters = read(self.root.join("proc/diskstats"));
         let rates = self
             .rates
             .sample(counters.as_deref().map(parse_diskstats).unwrap_or_default());
-        let mut out: BTreeMap<String, DiskStats> = BTreeMap::new();
-        for disk in disks.iter() {
-            let path = Path::new(disk.name());
+        // Filter and deduplicate before asking for space: statvfs on a FUSE or
+        // network mount whose server has gone away can block indefinitely, so
+        // only block-device mounts are ever queried.
+        let mut chosen: BTreeMap<String, (String, String)> = BTreeMap::new();
+        for (dev, mount_point, fs) in parse_mounts(&mounts) {
+            let path = Path::new(&dev);
             if !path.starts_with("/dev") {
                 continue;
             }
             let Some(device) = device_name(&self.root, path) else {
                 continue;
             };
-            let mount_point = disk.mount_point().to_string_lossy().into_owned();
-            if out
+            if chosen
                 .get(&device)
-                .is_some_and(|d| d.mount_point.len() <= mount_point.len())
+                .is_some_and(|(m, _)| m.len() <= mount_point.len())
             {
                 continue;
             }
-            let missing = if counters.is_none() {
-                "diskstats not readable"
-            } else {
-                "device counters not reported"
+            chosen.insert(device, (mount_point, fs));
+        }
+        let missing = if counters.is_none() {
+            "diskstats not readable"
+        } else {
+            "device counters not reported"
+        };
+        let mut out: Vec<DiskStats> = Vec::new();
+        for (device, (mount_point, file_system)) in chosen {
+            let Some((total_bytes, available_bytes)) = (self.space)(Path::new(&mount_point)) else {
+                continue;
             };
             let (read_bps, write_bps) = rates
                 .get(&device)
                 .cloned()
                 .unwrap_or_else(|| (Reading::unavailable(missing), Reading::unavailable(missing)));
-            out.insert(
-                device.clone(),
-                DiskStats {
-                    mount_point,
-                    device,
-                    file_system: disk.file_system().to_string_lossy().into_owned(),
-                    total_bytes: disk.total_space(),
-                    available_bytes: disk.available_space(),
-                    read_bps,
-                    write_bps,
-                },
-            );
+            out.push(DiskStats {
+                mount_point,
+                device,
+                file_system,
+                total_bytes,
+                available_bytes,
+                read_bps,
+                write_bps,
+            });
         }
-        let mut out: Vec<_> = out.into_values().collect();
         out.sort_by(|a, b| a.mount_point.cmp(&b.mount_point));
         Reading::Available(out)
     }
@@ -97,6 +170,42 @@ impl Source for Disks {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn only_block_device_mounts_are_queried_for_space() {
+        let tree = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tree.path().join("proc/self")).unwrap();
+        std::fs::create_dir_all(tree.path().join("dev")).unwrap();
+        std::fs::write(tree.path().join("dev/nvme0n1p2"), "").unwrap();
+        std::fs::write(
+            tree.path().join("proc/self/mounts"),
+            "/dev/nvme0n1p2 / btrfs rw,subvol=/@ 0 0\n\
+             /dev/nvme0n1p2 /home btrfs rw,subvol=/@home 0 0\n\
+             proc /proc proc rw 0 0\n\
+             alice@host:/srv /home/alice/remote fuse.sshfs rw 0 0\n\
+             server:/export /mnt/nfs nfs4 rw 0 0\n\
+             /dev/sdb1 /mnt/My\\040Drive ext4 rw 0 0\n",
+        )
+        .unwrap();
+        let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = asked.clone();
+        let mut d = Disks::with_space(tree.path().into(), move |p: &Path| {
+            log.lock().unwrap().push(p.to_path_buf());
+            Some((1000, 250))
+        });
+        let disks = d.sample();
+        let disks = disks.value().unwrap();
+        let asked = asked.lock().unwrap().clone();
+        assert_eq!(
+            asked,
+            vec![PathBuf::from("/"), PathBuf::from("/mnt/My Drive")],
+            "statvfs only on deduplicated block-device mounts"
+        );
+        assert_eq!(disks.len(), 2);
+        assert_eq!(disks[0].mount_point, "/");
+        assert_eq!(disks[0].total_bytes, 1000);
+        assert_eq!(disks[0].available_bytes, 250);
+        assert_eq!(disks[1].mount_point, "/mnt/My Drive");
+    }
     #[test]
     fn kernel_diskstats_columns() {
         let stats = parse_diskstats(

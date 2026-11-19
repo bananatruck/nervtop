@@ -99,16 +99,19 @@ fn emit_background_runs(
             x += 1;
             continue;
         }
+        // A wide glyph's lead cell paints every column it covers: its
+        // continuation cells are reset by ratatui and carry no paint.
         let start = x;
-        let mut run_w = 1usize;
-        x += 1;
+        let mut run_w = advance_columns(&line[x]).min(width - x);
+        x += run_w;
         while x < width && !hidden[x] && !matches!(line[x].diff_option, CellDiffOption::Skip) {
             let next_bg = effective_bg(&line[x], palette, page_bg);
             if next_bg != bg || should_skip_bg_paint(&next_bg, page_bg) {
                 break;
             }
-            run_w += 1;
-            x += 1;
+            let step = advance_columns(&line[x]).min(width - x);
+            run_w += step;
+            x += step;
         }
         let rx = PADDING + start as f64 * CELL_WIDTH;
         let rw = run_w as f64 * CELL_WIDTH;
@@ -613,6 +616,34 @@ mod tests {
         let b_x = PADDING + 2.0 * CELL_WIDTH;
         assert!(svg.contains(&format!(r#"x="{b_x:.1}""#)));
         assert_eq!(svg.matches("<text").count(), 2);
+    }
+
+    #[test]
+    fn wide_glyph_background_covers_both_columns() {
+        let mut buf = empty_buf(4, 1);
+        buf.set_string(0, 0, "あ", Style::default().bg(Color::Blue));
+        let svg = buffer_to_svg(&buf, &nerv_palette());
+        let blue: Vec<&str> = svg
+            .lines()
+            .filter(|l| l.starts_with("<rect") && l.contains("fill=\"#0000ff\""))
+            .collect();
+        assert_eq!(blue.len(), 1, "{svg}");
+        let full = 2.0 * CELL_WIDTH;
+        assert!(blue[0].contains(&format!(r#"width="{full:.1}""#)), "{svg}");
+    }
+
+    #[test]
+    fn wide_glyph_background_merges_with_neighbours() {
+        let mut buf = empty_buf(5, 1);
+        buf.set_string(0, 0, "aあb", Style::default().bg(Color::Blue));
+        let svg = buffer_to_svg(&buf, &nerv_palette());
+        let blue: Vec<&str> = svg
+            .lines()
+            .filter(|l| l.starts_with("<rect") && l.contains("fill=\"#0000ff\""))
+            .collect();
+        assert_eq!(blue.len(), 1, "{svg}");
+        let full = 4.0 * CELL_WIDTH;
+        assert!(blue[0].contains(&format!(r#"width="{full:.1}""#)), "{svg}");
     }
 
     #[test]

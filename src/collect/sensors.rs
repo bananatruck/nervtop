@@ -26,6 +26,14 @@ impl Source for Sensors {
             let Some(chip) = read(dir.join("name")) else {
                 continue;
             };
+            // Reading a runtime-suspended device's inputs (an AMD or nouveau
+            // dGPU, for example) can resume it; leave sleeping devices alone.
+            if matches!(
+                read(dir.join("device/power/runtime_status")).as_deref(),
+                Some("suspended" | "suspending")
+            ) {
+                continue;
+            }
             let kind = match chip.as_str() {
                 "k10temp" | "coretemp" | "zenpower" => SensorKind::Cpu,
                 "amdgpu" | "radeon" | "nouveau" => SensorKind::Gpu,
@@ -84,6 +92,29 @@ pub(crate) mod tests {
         let path = root.join(path);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, text).unwrap();
+    }
+    #[test]
+    fn suspended_devices_are_not_read() {
+        // Reading a suspended dGPU's hwmon inputs can resume it.
+        let t = tempfile::tempdir().unwrap();
+        put(t.path(), "sys/class/hwmon/hwmon0/name", "amdgpu");
+        put(t.path(), "sys/class/hwmon/hwmon0/temp1_input", "45000");
+        put(
+            t.path(),
+            "sys/class/hwmon/hwmon0/device/power/runtime_status",
+            "suspended",
+        );
+        put(t.path(), "sys/class/hwmon/hwmon1/name", "k10temp");
+        put(t.path(), "sys/class/hwmon/hwmon1/temp1_input", "50000");
+        put(
+            t.path(),
+            "sys/class/hwmon/hwmon1/device/power/runtime_status",
+            "active",
+        );
+        let s = Sensors::new(t.path().into()).sample();
+        let temps = &s.value().unwrap().temps;
+        assert_eq!(temps.len(), 1, "{temps:?}");
+        assert_eq!(temps[0].chip, "k10temp");
     }
     #[test]
     fn fans_are_reported_without_any_temperature() {

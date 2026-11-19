@@ -200,8 +200,10 @@ fn draw_sensors_table(frame: &mut Frame, area: Rect, app: &App) {
         .iter()
         .enumerate()
         .map(|(pos, &i)| {
+            // The identifier column takes what the measurements leave: a
+            // `Min` here would outrank their `Length` and squeeze them out.
             if pos == 0 {
-                Constraint::Min(col_w[i] as u16)
+                Constraint::Fill(1)
             } else {
                 Constraint::Length(col_w[i] as u16)
             }
@@ -355,8 +357,10 @@ fn draw_gpus_table(frame: &mut Frame, area: Rect, app: &App) {
         .iter()
         .enumerate()
         .map(|(pos, &i)| {
+            // The identifier column takes what the measurements leave: a
+            // `Min` here would outrank their `Length` and squeeze them out.
             if pos == 0 {
-                Constraint::Min(col_w[i] as u16)
+                Constraint::Fill(1)
             } else {
                 Constraint::Length(col_w[i] as u16)
             }
@@ -598,7 +602,7 @@ fn draw_io_table(frame: &mut Frame, area: Rect, app: &App) {
             })
             .collect();
         let widths = [
-            Constraint::Min(col_w[0] as u16),
+            Constraint::Fill(1),
             Constraint::Length(col_w[1] as u16),
             Constraint::Length(col_w[2] as u16),
         ];
@@ -613,10 +617,7 @@ fn draw_io_table(frame: &mut Frame, area: Rect, app: &App) {
                 ])
             })
             .collect();
-        let widths = [
-            Constraint::Min(col_w[0] as u16),
-            Constraint::Length(col_w[1] as u16),
-        ];
+        let widths = [Constraint::Fill(1), Constraint::Length(col_w[1] as u16)];
         frame.render_widget(Table::new(rows, widths).column_spacing(1), inner);
     }
 }
@@ -809,4 +810,66 @@ fn fit_rule_name(key: &str, subject: &str, width: usize) -> String {
     }
     let cut: String = subject.chars().take(room).collect();
     format!("{key} {cut}\u{2026}")
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::app::Screen;
+    use crate::model::Reading;
+    use crate::ui::testkit::{buffer_lines, nominal_app, render};
+
+    /// A 40-column identifier: longer than the whole 29-column interior of
+    /// the left-hand tables at 80x24.
+    const LONG_ID: &str = "thinkpad_acpi_extended_sensor:cpu_pkg_01";
+
+    /// The left-hand column (31 cells at 80 columns) of the row that holds `needle`.
+    fn left_row(lines: &[String], needle: &str) -> String {
+        let row = lines
+            .iter()
+            .find(|l| l.contains(needle))
+            .unwrap_or_else(|| panic!("a row containing {needle:?}:\n{}", lines.join("\n")));
+        row.chars().take(31).collect()
+    }
+
+    #[test]
+    fn long_sensor_identifier_keeps_its_value_at_80x24() {
+        assert_eq!(LONG_ID.chars().count(), 40);
+        let mut app = nominal_app();
+        app.screen = Screen::Diagnostics;
+        if let Some(Reading::Available(s)) = app.snapshot.as_mut().map(|s| &mut s.sensors) {
+            let (chip, label) = LONG_ID.split_once(':').unwrap();
+            s.temps[0].chip = chip.into();
+            s.temps[0].label = label.into();
+        }
+        let lines = buffer_lines(&render(&app, 80, 24));
+        let row = left_row(&lines, "thinkpad_acpi");
+        assert!(row.contains("92.0°C"), "value column lost: {row:?}");
+    }
+
+    #[test]
+    fn long_adapter_name_keeps_its_utilization_at_80x24() {
+        let mut app = nominal_app();
+        app.screen = Screen::Diagnostics;
+        if let Some(Reading::Available(g)) = app.snapshot.as_mut().map(|s| &mut s.gpus) {
+            g[0].name = "AMD Radeon 780M Graphics Integrated Adapter".into();
+        }
+        let lines = buffer_lines(&render(&app, 80, 24));
+        let row = left_row(&lines, "AMD Radeon");
+        assert!(row.contains("34.0%"), "utilization column lost: {row:?}");
+    }
+
+    #[test]
+    fn long_mount_point_keeps_its_capacity_at_80x24() {
+        let mut app = nominal_app();
+        app.screen = Screen::Diagnostics;
+        if let Some(Reading::Available(d)) = app.snapshot.as_mut().map(|s| &mut s.disks) {
+            d[0].mount_point = "/run/media/someone/ExternalBackupDriveXY".into();
+        }
+        let lines = buffer_lines(&render(&app, 80, 24));
+        let row = left_row(&lines, "/run/m");
+        assert!(
+            row.contains("280.0 GiB/500.0 GiB"),
+            "capacity column lost: {row:?}"
+        );
+    }
 }

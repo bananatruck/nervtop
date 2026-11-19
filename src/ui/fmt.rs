@@ -3,6 +3,7 @@
 use crate::alert::Level;
 use crate::model::Reading;
 use crate::theme::Palette;
+use ratatui::buffer::CellWidth;
 use ratatui::style::{Color, Style};
 use ratatui::text::Span;
 
@@ -144,6 +145,39 @@ pub fn reading_span<T>(
     }
 }
 
+/// Width of `s` in terminal cells, counted the way ratatui lays it out
+/// (whole graphemes, control characters dropped).
+pub fn display_width(s: &str) -> usize {
+    Span::raw(s)
+        .styled_graphemes(Style::default())
+        .map(|g| usize::from(g.symbol.cell_width()))
+        .sum()
+}
+
+/// Shortens `s` to at most `max` terminal cells. Nothing is cut when it
+/// fits; otherwise whole graphemes are kept and "…" marks the cut.
+pub fn fit_width(s: &str, max: usize) -> String {
+    if display_width(s) <= max {
+        return s.to_owned();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    let room = max - 1;
+    let mut out = String::new();
+    let mut used = 0;
+    for g in Span::raw(s).styled_graphemes(Style::default()) {
+        let w = usize::from(g.symbol.cell_width());
+        if used + w > room {
+            break;
+        }
+        out.push_str(g.symbol);
+        used += w;
+    }
+    out.push('\u{2026}');
+    out
+}
+
 /// Builds a horizontal line bar of `width` characters for `pct` (0.0..=100.0),
 /// returning `(filled, empty)` using `━` for the filled part and `─` for the empty part.
 pub fn bar(width: usize, pct: f64) -> (String, String) {
@@ -219,6 +253,19 @@ mod tests {
         );
         assert_eq!(unavailable_str("no hwmon sensors", 11), "unavailable");
         assert_eq!(unavailable_str("", 40), "unavailable");
+    }
+
+    #[test]
+    fn fit_width_counts_display_cells_and_marks_cuts() {
+        assert_eq!(display_width("abc"), 3);
+        assert_eq!(display_width("数据"), 4);
+        assert_eq!(fit_width("abcdef", 6), "abcdef");
+        assert_eq!(fit_width("abcdef", 4), "abc\u{2026}");
+        assert_eq!(fit_width("abcdef", 1), "\u{2026}");
+        assert_eq!(fit_width("abcdef", 0), "");
+        // A wide character that would cross the limit is left out whole.
+        assert_eq!(fit_width("a数据", 4), "a数\u{2026}");
+        assert_eq!(fit_width("数据数", 4), "数\u{2026}");
     }
 
     #[test]

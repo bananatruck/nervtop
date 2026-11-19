@@ -17,11 +17,17 @@ command -v tmux >/dev/null || { echo "tmux is required" >&2; exit 1; }
 [ -x "$bin" ] || { echo "nervtop binary not found at $bin" >&2; exit 1; }
 
 cols="${size%x*}"; rows="${size#*x}"
-tmux new-session -d -s "$session" -x "$cols" -y "$rows" "$bin --interval $interval"
+# The binary and its arguments go to tmux as separate words, so tmux runs
+# nervtop directly (no shell) and a path with spaces stays one argument.
+# That also makes the pane's process nervtop itself, so its PID comes from
+# this session and never from another nervtop that happens to be running.
 trap 'tmux kill-session -t "$session" 2>/dev/null || true' EXIT
+pid=$(tmux new-session -d -P -F '#{pane_pid}' -s "$session" -x "$cols" -y "$rows" \
+  "$bin" --interval "$interval")
 sleep 5  # let it start and warm up
+[ "$(readlink -f "/proc/$pid/exe" || true)" = "$(readlink -f "$bin")" ] ||
+  { echo "pane process $pid is not running $bin" >&2; exit 1; }
 
-pid=$(pgrep -n -f "^$bin --interval $interval")
 ticks=$(getconf CLK_TCK)
 cpu_ticks() { awk '{print $14 + $15}' "/proc/$pid/stat"; }
 

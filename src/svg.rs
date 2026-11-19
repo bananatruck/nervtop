@@ -99,16 +99,19 @@ fn emit_background_runs(
             x += 1;
             continue;
         }
+        // A wide glyph's lead cell paints every column it covers: its
+        // continuation cells are reset by ratatui and carry no paint.
         let start = x;
-        let mut run_w = 1usize;
-        x += 1;
+        let mut run_w = advance_columns(&line[x]).min(width - x);
+        x += run_w;
         while x < width && !hidden[x] && !matches!(line[x].diff_option, CellDiffOption::Skip) {
             let next_bg = effective_bg(&line[x], palette, page_bg);
             if next_bg != bg || should_skip_bg_paint(&next_bg, page_bg) {
                 break;
             }
-            run_w += 1;
-            x += 1;
+            let step = advance_columns(&line[x]).min(width - x);
+            run_w += step;
+            x += step;
         }
         let rx = PADDING + start as f64 * CELL_WIDTH;
         let rw = run_w as f64 * CELL_WIDTH;
@@ -393,14 +396,26 @@ fn should_skip_bg_paint(bg_hex: &str, page_bg: &str) -> bool {
     bg_hex == page_bg
 }
 
-fn effective_bg(cell: &ratatui::buffer::Cell, palette: &Palette, page_bg: &str) -> String {
-    let (fg, bg) = if cell.modifier.contains(Modifier::REVERSED) {
-        (cell.bg, cell.fg)
+/// The foreground and background a terminal paints for `cell`. Each colour
+/// is resolved in its own role first (a default foreground is the theme
+/// text, a default background is the page), and only then does REVERSED
+/// swap them, the way a terminal reverses its default colours.
+fn painted_colors(
+    cell: &ratatui::buffer::Cell,
+    palette: &Palette,
+    page_bg: &str,
+) -> (String, String) {
+    let fg = resolve_fg_color(cell.fg, palette, page_bg);
+    let bg = resolve_bg_color(cell.bg, palette, page_bg);
+    if cell.modifier.contains(Modifier::REVERSED) {
+        (bg, fg)
     } else {
-        (cell.fg, cell.bg)
-    };
-    let _ = fg;
-    resolve_bg_color(bg, palette, page_bg)
+        (fg, bg)
+    }
+}
+
+fn effective_bg(cell: &ratatui::buffer::Cell, palette: &Palette, page_bg: &str) -> String {
+    painted_colors(cell, palette, page_bg).1
 }
 
 fn text_attributes(
@@ -408,13 +423,7 @@ fn text_attributes(
     palette: &Palette,
     page_bg: &str,
 ) -> (String, String, String) {
-    let (fg, bg) = if cell.modifier.contains(Modifier::REVERSED) {
-        (cell.bg, cell.fg)
-    } else {
-        (cell.fg, cell.bg)
-    };
-    let _ = bg;
-    let fg_hex = resolve_fg_color(fg, palette, page_bg);
+    let (fg_hex, _) = painted_colors(cell, palette, page_bg);
     let mut attrs = String::new();
     if cell.modifier.contains(Modifier::BOLD) {
         attrs.push_str(r#" font-weight="bold""#);
@@ -505,10 +514,19 @@ fn xml_escape(s: &str) -> String {
             '>' => out.push_str("&gt;"),
             '"' => out.push_str("&quot;"),
             '\'' => out.push_str("&apos;"),
-            _ => out.push(ch),
+            _ if is_xml_char(ch) => out.push(ch),
+            // XML 1.0 cannot represent this character even escaped.
+            _ => out.push('\u{FFFD}'),
         }
     }
     out
+}
+
+/// The XML 1.0 `Char` production: tab, newline, carriage return and every
+/// scalar value from U+0020 except U+FFFE and U+FFFF (surrogates cannot
+/// occur in a Rust `char`).
+fn is_xml_char(ch: char) -> bool {
+    matches!(ch, '\t' | '\n' | '\r' | '\u{20}'..='\u{FFFD}' | '\u{10000}'..)
 }
 
 #[cfg(test)]
@@ -613,6 +631,85 @@ mod tests {
         let b_x = PADDING + 2.0 * CELL_WIDTH;
         assert!(svg.contains(&format!(r#"x="{b_x:.1}""#)));
         assert_eq!(svg.matches("<text").count(), 2);
+    }
+
+    #[test]
+    fn wide_glyph_background_covers_both_columns() {
+        let mut buf = empty_buf(4, 1);
+        buf.set_string(0, 0, "あ", Style::default().bg(Color::Blue));
+        let svg = buffer_to_svg(&buf, &nerv_palette());
+        let blue: Vec<&str> = svg
+            .lines()
+            .filter(|l| l.starts_with("<rect") && l.contains("fill=\"#0000ff\""))
+            .collect();
+        assert_eq!(blue.len(), 1, "{svg}");
+        let full = 2.0 * CELL_WIDTH;
+        assert!(blue[0].contains(&format!(r#"width="{full:.1}""#)), "{svg}");
+    }
+
+    #[test]
+    fn wide_glyph_background_merges_with_neighbours() {
+        let mut buf = empty_buf(5, 1);
+        buf.set_string(0, 0, "aあb", Style::default().bg(Color::Blue));
+        let svg = buffer_to_svg(&buf, &nerv_palette());
+        let blue: Vec<&str> = svg
+            .lines()
+            .filter(|l| l.starts_with("<rect") && l.contains("fill=\"#0000ff\""))
+            .collect();
+        assert_eq!(blue.len(), 1, "{svg}");
+        let full = 4.0 * CELL_WIDTH;
+        assert!(blue[0].contains(&format!(r#"width="{full:.1}""#)), "{svg}");
+    }
+
+    #[test]
+    fn reversed_default_colours_swap_text_and_page_background() {
+        let palette = nerv_palette();
+        let page_bg = page_background(&palette);
+        let text = color_to_hex(palette.text, &palette, false);
+        assert_ne!(page_bg, text);
+        let mut buf = empty_buf(1, 1);
+        buf[(0, 0)]
+            .set_symbol("x")
+            .set_style(Style::default().add_modifier(Modifier::REVERSED));
+        let svg = buffer_to_svg(&buf, &palette);
+        let rects: Vec<&str> = svg.lines().filter(|l| l.starts_with("<rect x=")).collect();
+        assert_eq!(rects.len(), 1, "{svg}");
+        assert!(rects[0].contains(&format!(r#"fill="{text}""#)), "{svg}");
+        let text_line = svg.lines().find(|l| l.starts_with("<text")).unwrap();
+        assert!(text_line.contains(&format!(r#"fill="{page_bg}""#)), "{svg}");
+    }
+
+    #[test]
+    fn reversed_explicit_fg_over_default_bg_uses_page_background_for_text() {
+        let palette = nerv_palette();
+        let page_bg = page_background(&palette);
+        let mut buf = empty_buf(1, 1);
+        buf[(0, 0)].set_symbol("x").set_style(
+            Style::default()
+                .fg(Color::Red)
+                .add_modifier(Modifier::REVERSED),
+        );
+        let svg = buffer_to_svg(&buf, &palette);
+        let text_line = svg.lines().find(|l| l.starts_with("<text")).unwrap();
+        assert!(text_line.contains(&format!(r#"fill="{page_bg}""#)), "{svg}");
+        assert!(svg.contains(r##"fill="#cd0000"/>"##), "{svg}");
+    }
+
+    #[test]
+    fn xml_forbidden_characters_become_replacement_characters() {
+        let mut buf = empty_buf(3, 1);
+        buf[(0, 0)].set_symbol("a");
+        buf[(1, 0)].set_symbol("\u{FFFF}");
+        buf[(2, 0)].set_symbol("\u{FFFE}");
+        let svg = buffer_to_svg(&buf, &nerv_palette());
+        assert!(!svg.contains('\u{FFFF}'), "{svg}");
+        assert!(!svg.contains('\u{FFFE}'), "{svg}");
+        assert!(svg.contains("a\u{FFFD}\u{FFFD}"), "{svg}");
+        // A buffer cell cannot hold a C0 control (ratatui rejects them), so
+        // the escaper is checked directly for those.
+        assert_eq!(xml_escape("a\u{1}b\u{1F}"), "a\u{FFFD}b\u{FFFD}");
+        assert_eq!(xml_escape("tab\there\n\r"), "tab\there\n\r");
+        assert_eq!(xml_escape("\u{10000}\u{E000}"), "\u{10000}\u{E000}");
     }
 
     #[test]

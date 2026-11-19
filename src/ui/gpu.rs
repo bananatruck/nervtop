@@ -71,9 +71,13 @@ fn render_adapter_lines(
     let text_style = Style::default().fg(p.text);
     let unknown = Style::default().fg(p.unknown);
 
+    // Each row reserves room for its status (utilization or SUSPENDED)
+    // first; the adapter name gets what is left and is shortened only when
+    // it would not fit whole.
     if gpu.power_state == GpuPower::Suspended {
+        let name = fmt::fit_width(&gpu.name, width.saturating_sub(2 + "SUSPENDED".len()));
         lines.push(Line::from(vec![
-            Span::styled(gpu.name.clone(), name_style),
+            Span::styled(name, name_style),
             Span::styled("  ", muted),
             Span::styled(
                 "SUSPENDED",
@@ -120,10 +124,12 @@ fn render_adapter_lines(
     };
 
     if multi_line {
-        let mut row1 = vec![
-            Span::styled(gpu.name.clone(), name_style),
-            Span::styled("  ", muted),
-        ];
+        let util_w: usize = util_spans
+            .iter()
+            .map(|s| fmt::display_width(&s.content))
+            .sum();
+        let name = fmt::fit_width(&gpu.name, width.saturating_sub(2 + util_w));
+        let mut row1 = vec![Span::styled(name, name_style), Span::styled("  ", muted)];
         row1.extend(util_spans);
         lines.push(Line::from(row1));
 
@@ -136,9 +142,14 @@ fn render_adapter_lines(
             pwr_span,
         ]));
     } else {
-        let name_len = gpu.name.chars().count();
-        let mut row = vec![Span::styled(gpu.name.clone(), name_style)];
-        let mut used_w = name_len;
+        // The shortest utilization form: " 34.0%" or " unavailable (...)".
+        let min_util_w = match &gpu.utilization_percent {
+            Reading::Available(u) => 1 + fmt::percent(*u as f64).len(),
+            Reading::Unavailable(r) => 1 + fmt::unavailable_str(r, reason_room).len(),
+        };
+        let name = fmt::fit_width(&gpu.name, width.saturating_sub(min_util_w));
+        let mut used_w = fmt::display_width(&name);
+        let mut row = vec![Span::styled(name, name_style)];
 
         match &gpu.utilization_percent {
             Reading::Available(u) => {
@@ -184,5 +195,76 @@ fn render_adapter_lines(
             row.push(pwr_span);
         }
         lines.push(Line::from(row));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::draw_gpu;
+    use crate::app::App;
+    use crate::model::Reading;
+    use crate::ui::testkit::{buffer_lines, nominal_app};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    const LONG_NAME: &str = "NVIDIA GeForce RTX 4060 Laptop GPU";
+
+    /// Draws only the GPU panel into a `width` x `height` terminal.
+    fn panel_lines(app: &App, width: u16, height: u16) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| draw_gpu(frame, frame.area(), app))
+            .unwrap();
+        buffer_lines(terminal.backend().buffer())
+    }
+
+    fn row_with<'a>(lines: &'a [String], needle: &str) -> &'a str {
+        lines
+            .iter()
+            .find(|l| l.contains(needle))
+            .unwrap_or_else(|| panic!("a row containing {needle:?}:\n{}", lines.join("\n")))
+    }
+
+    fn app_with_names(active: &str, suspended: &str) -> App {
+        let mut app = nominal_app();
+        if let Some(Reading::Available(g)) = app.snapshot.as_mut().map(|s| &mut s.gpus) {
+            g[0].name = active.into();
+            g[1].name = suspended.into();
+        }
+        app
+    }
+
+    #[test]
+    fn long_active_adapter_name_leaves_room_for_utilization() {
+        let app = app_with_names(LONG_NAME, "dGPU");
+        // 40 columns is the GPU panel at 80x24 (38 inner columns).
+        // Height 6 gives two lines per adapter, height 4 one line each.
+        for height in [6, 4] {
+            let lines = panel_lines(&app, 40, height);
+            let row = row_with(&lines, "NVIDIA");
+            assert!(row.contains("34.0%"), "height {height}: {row:?}");
+        }
+    }
+
+    #[test]
+    fn long_suspended_adapter_name_leaves_room_for_suspended() {
+        let app = app_with_names("iGPU", LONG_NAME);
+        for height in [6, 4] {
+            let lines = panel_lines(&app, 40, height);
+            let row = row_with(&lines, "NVIDIA");
+            assert!(row.contains("SUSPENDED"), "height {height}: {row:?}");
+        }
+    }
+
+    #[test]
+    fn adapter_names_stay_whole_when_they_fit() {
+        let app = app_with_names(LONG_NAME, LONG_NAME);
+        for height in [6, 4] {
+            let lines = panel_lines(&app, 80, height);
+            let text = lines.join("\n");
+            assert_eq!(text.matches(LONG_NAME).count(), 2, "{text}");
+            assert!(text.contains("34.0%"), "{text}");
+            assert!(text.contains("SUSPENDED"), "{text}");
+        }
     }
 }

@@ -1215,3 +1215,37 @@ fn unavailable_process_scan_keeps_selection_until_a_successful_scan() {
     a.apply_snapshot(processes(&[]));
     assert_eq!(a.procs.selected_pid, None);
 }
+
+#[test]
+fn name_sort_keeps_pid_ties_ascending_in_both_directions() {
+    let mut a = app();
+    let mut s = processes(&[3, 2, 1]);
+    if let Reading::Available(list) = &mut s.processes {
+        for p in list {
+            p.name = match p.pid {
+                1 => "Alpha",
+                2 => "alpha",
+                _ => "Beta",
+            }
+            .into();
+        }
+    }
+    a.apply_snapshot(s);
+    a.procs.sort = SortKey::Name;
+    a.procs.descending = false;
+    assert_eq!(
+        a.visible_processes()
+            .iter()
+            .map(|p| p.pid)
+            .collect::<Vec<_>>(),
+        [1, 2, 3]
+    );
+    key(&mut a, K::Char('r'));
+    assert_eq!(
+        a.visible_processes()
+            .iter()
+            .map(|p| p.pid)
+            .collect::<Vec<_>>(),
+        [3, 1, 2]
+    );
+}

@@ -251,21 +251,27 @@ impl App {
             .filter(|p| !(hide_kernel && p.kernel_thread))
             .filter(|p| needle.is_empty() || p.name.to_lowercase().contains(&needle))
             .collect();
-        let key = self.procs.sort;
-        out.sort_by(|a, b| {
-            let ord = match key {
-                SortKey::Cpu => a.cpu_percent.total_cmp(&b.cpu_percent),
-                SortKey::Memory => a.memory_bytes.cmp(&b.memory_bytes),
-                SortKey::Pid => a.pid.cmp(&b.pid),
-                SortKey::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
-            };
-            let ord = if self.procs.descending {
-                ord.reverse()
-            } else {
-                ord
-            };
-            ord.then(a.pid.cmp(&b.pid))
-        });
+        use std::cmp::Reverse;
+        match (self.procs.sort, self.procs.descending) {
+            (SortKey::Name, true) => {
+                out.sort_by_cached_key(|p| (Reverse(p.name.to_lowercase()), p.pid))
+            }
+            (SortKey::Name, false) => out.sort_by_cached_key(|p| (p.name.to_lowercase(), p.pid)),
+            (SortKey::Memory, true) => out.sort_by_key(|p| (Reverse(p.memory_bytes), p.pid)),
+            (SortKey::Memory, false) => out.sort_by_key(|p| (p.memory_bytes, p.pid)),
+            (SortKey::Pid, true) => out.sort_by_key(|p| Reverse(p.pid)),
+            (SortKey::Pid, false) => out.sort_by_key(|p| p.pid),
+            (SortKey::Cpu, true) => out.sort_by(|a, b| {
+                b.cpu_percent
+                    .total_cmp(&a.cpu_percent)
+                    .then(a.pid.cmp(&b.pid))
+            }),
+            (SortKey::Cpu, false) => out.sort_by(|a, b| {
+                a.cpu_percent
+                    .total_cmp(&b.cpu_percent)
+                    .then(a.pid.cmp(&b.pid))
+            }),
+        }
         out
     }
 
@@ -393,6 +399,10 @@ impl App {
             .position(|p| Some(p.pid) == self.procs.selected_pid)
             .unwrap_or(fallback.min(len.saturating_sub(1)));
         self.procs.selected_pid = list.get(index).map(|p| p.pid);
+        self.scroll_process_selection(index, len);
+    }
+
+    fn scroll_process_selection(&mut self, index: usize, len: usize) {
         self.procs.offset = self
             .procs
             .offset
@@ -562,8 +572,12 @@ impl App {
                 {
                     return Effect::None;
                 }
-                let len = self.visible_processes().len();
-                let i = self.selected_index();
+                let list = self.visible_processes();
+                let len = list.len();
+                let i = list
+                    .iter()
+                    .position(|p| Some(p.pid) == self.procs.selected_pid)
+                    .unwrap_or(0);
                 let index = match key.code {
                     K::Char('j') | K::Down => i.saturating_add(1),
                     K::Char('k') | K::Up => i.saturating_sub(1),
@@ -573,8 +587,8 @@ impl App {
                     _ => len.saturating_sub(1),
                 }
                 .min(len.saturating_sub(1));
-                self.procs.selected_pid = self.visible_processes().get(index).map(|p| p.pid);
-                self.clamp_selection(index);
+                self.procs.selected_pid = list.get(index).map(|p| p.pid);
+                self.scroll_process_selection(index, len);
             }
             _ => return Effect::None,
         }

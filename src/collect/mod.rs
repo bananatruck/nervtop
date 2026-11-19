@@ -198,15 +198,15 @@ pub fn rate(previous: Option<u64>, current: u64, elapsed_secs: f64) -> Reading<f
 }
 
 #[derive(Default)]
-struct Rates {
-    previous: std::collections::BTreeMap<String, (u64, u64)>,
+struct Rates<K = String> {
+    previous: std::collections::BTreeMap<K, (u64, u64)>,
     at: Option<std::time::Instant>,
 }
-impl Rates {
+impl<K: Ord + Clone> Rates<K> {
     fn sample(
         &mut self,
-        counters: std::collections::BTreeMap<String, (u64, u64)>,
-    ) -> std::collections::BTreeMap<String, (Reading<f64>, Reading<f64>)> {
+        counters: std::collections::BTreeMap<K, (u64, u64)>,
+    ) -> std::collections::BTreeMap<K, (Reading<f64>, Reading<f64>)> {
         let now = std::time::Instant::now();
         let elapsed = self
             .at

@@ -396,14 +396,26 @@ fn should_skip_bg_paint(bg_hex: &str, page_bg: &str) -> bool {
     bg_hex == page_bg
 }
 
-fn effective_bg(cell: &ratatui::buffer::Cell, palette: &Palette, page_bg: &str) -> String {
-    let (fg, bg) = if cell.modifier.contains(Modifier::REVERSED) {
-        (cell.bg, cell.fg)
+/// The foreground and background a terminal paints for `cell`. Each colour
+/// is resolved in its own role first (a default foreground is the theme
+/// text, a default background is the page), and only then does REVERSED
+/// swap them, the way a terminal reverses its default colours.
+fn painted_colors(
+    cell: &ratatui::buffer::Cell,
+    palette: &Palette,
+    page_bg: &str,
+) -> (String, String) {
+    let fg = resolve_fg_color(cell.fg, palette, page_bg);
+    let bg = resolve_bg_color(cell.bg, palette, page_bg);
+    if cell.modifier.contains(Modifier::REVERSED) {
+        (bg, fg)
     } else {
-        (cell.fg, cell.bg)
-    };
-    let _ = fg;
-    resolve_bg_color(bg, palette, page_bg)
+        (fg, bg)
+    }
+}
+
+fn effective_bg(cell: &ratatui::buffer::Cell, palette: &Palette, page_bg: &str) -> String {
+    painted_colors(cell, palette, page_bg).1
 }
 
 fn text_attributes(
@@ -411,13 +423,7 @@ fn text_attributes(
     palette: &Palette,
     page_bg: &str,
 ) -> (String, String, String) {
-    let (fg, bg) = if cell.modifier.contains(Modifier::REVERSED) {
-        (cell.bg, cell.fg)
-    } else {
-        (cell.fg, cell.bg)
-    };
-    let _ = bg;
-    let fg_hex = resolve_fg_color(fg, palette, page_bg);
+    let (fg_hex, _) = painted_colors(cell, palette, page_bg);
     let mut attrs = String::new();
     if cell.modifier.contains(Modifier::BOLD) {
         attrs.push_str(r#" font-weight="bold""#);
@@ -644,6 +650,40 @@ mod tests {
         assert_eq!(blue.len(), 1, "{svg}");
         let full = 4.0 * CELL_WIDTH;
         assert!(blue[0].contains(&format!(r#"width="{full:.1}""#)), "{svg}");
+    }
+
+    #[test]
+    fn reversed_default_colours_swap_text_and_page_background() {
+        let palette = nerv_palette();
+        let page_bg = page_background(&palette);
+        let text = color_to_hex(palette.text, &palette, false);
+        assert_ne!(page_bg, text);
+        let mut buf = empty_buf(1, 1);
+        buf[(0, 0)]
+            .set_symbol("x")
+            .set_style(Style::default().add_modifier(Modifier::REVERSED));
+        let svg = buffer_to_svg(&buf, &palette);
+        let rects: Vec<&str> = svg.lines().filter(|l| l.starts_with("<rect x=")).collect();
+        assert_eq!(rects.len(), 1, "{svg}");
+        assert!(rects[0].contains(&format!(r#"fill="{text}""#)), "{svg}");
+        let text_line = svg.lines().find(|l| l.starts_with("<text")).unwrap();
+        assert!(text_line.contains(&format!(r#"fill="{page_bg}""#)), "{svg}");
+    }
+
+    #[test]
+    fn reversed_explicit_fg_over_default_bg_uses_page_background_for_text() {
+        let palette = nerv_palette();
+        let page_bg = page_background(&palette);
+        let mut buf = empty_buf(1, 1);
+        buf[(0, 0)].set_symbol("x").set_style(
+            Style::default()
+                .fg(Color::Red)
+                .add_modifier(Modifier::REVERSED),
+        );
+        let svg = buffer_to_svg(&buf, &palette);
+        let text_line = svg.lines().find(|l| l.starts_with("<text")).unwrap();
+        assert!(text_line.contains(&format!(r#"fill="{page_bg}""#)), "{svg}");
+        assert!(svg.contains(r##"fill="#cd0000"/>"##), "{svg}");
     }
 
     #[test]

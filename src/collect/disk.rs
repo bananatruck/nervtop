@@ -75,16 +75,28 @@ fn unescape_mount(field: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// `(device, mount point, filesystem type)` for each line of a mounts table.
-fn parse_mounts(text: &str) -> Vec<(String, String, String)> {
-    text.lines()
+/// `(device, mount point, filesystem type)` for each visible mount in a
+/// mounts table. Fields are separated by ASCII spaces and tabs only, so a
+/// no-break space inside a path survives; a record that is not valid UTF-8 is
+/// skipped on its own; and a mount covered by a later mount at the same path
+/// is dropped, because querying that path would reach the covering one.
+fn parse_mounts(table: &[u8]) -> Vec<(String, String, String)> {
+    let records: Vec<(String, String, String)> = table
+        .split(|b| *b == b'\n')
+        .filter_map(|line| std::str::from_utf8(line).ok())
         .filter_map(|line| {
-            let mut f = line.split_whitespace();
+            let mut f = line.split([' ', '\t']).filter(|x| !x.is_empty());
             let device = unescape_mount(f.next()?);
             let mount = unescape_mount(f.next()?);
             let fs = f.next()?.to_owned();
             Some((device, mount, fs))
         })
+        .collect();
+    records
+        .iter()
+        .enumerate()
+        .filter(|(i, (_, mount, _))| !records[i + 1..].iter().any(|(_, m, _)| m == mount))
+        .map(|(_, r)| r.clone())
         .collect()
 }
 
@@ -112,7 +124,7 @@ fn device_name(root: &Path, device: &Path) -> Option<String> {
 impl Source for Disks {
     type Output = Vec<DiskStats>;
     fn sample(&mut self) -> Reading<Self::Output> {
-        let Some(mounts) = read(self.root.join("proc/self/mounts")) else {
+        let Ok(mounts) = std::fs::read(self.root.join("proc/self/mounts")) else {
             return Reading::unavailable("mount table not readable");
         };
         let counters = read(self.root.join("proc/diskstats"));
@@ -125,7 +137,9 @@ impl Source for Disks {
         let mut chosen: BTreeMap<String, (String, String)> = BTreeMap::new();
         for (dev, mount_point, fs) in parse_mounts(&mounts) {
             let path = Path::new(&dev);
-            if !path.starts_with("/dev") {
+            // FUSE filesystems (fuseblk, fuse.*) can hang in statvfs when
+            // their daemon stops, even when backed by a block device.
+            if !path.starts_with("/dev") || fs.starts_with("fuse") {
                 continue;
             }
             let Some(device) = device_name(&self.root, path) else {
@@ -170,6 +184,46 @@ impl Source for Disks {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn queried(mounts: &[u8]) -> Vec<PathBuf> {
+        let tree = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tree.path().join("proc/self")).unwrap();
+        std::fs::write(tree.path().join("proc/self/mounts"), mounts).unwrap();
+        let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = asked.clone();
+        let mut d = Disks::with_space(tree.path().into(), move |p: &Path| {
+            log.lock().unwrap().push(p.to_path_buf());
+            Some((1000, 250))
+        });
+        d.sample();
+        asked.lock().unwrap().clone()
+    }
+
+    #[test]
+    fn fuse_filesystems_on_block_devices_are_not_queried() {
+        let asked = queried(b"/dev/sdb1 /mnt/win fuseblk rw 0 0\n/dev/sda1 / ext4 rw 0 0\n");
+        assert_eq!(asked, vec![PathBuf::from("/")]);
+    }
+
+    #[test]
+    fn a_mount_hidden_under_a_later_mount_is_not_queried() {
+        let asked = queried(
+            b"/dev/sda1 / ext4 rw 0 0\n/dev/sdb1 /data ext4 rw 0 0\nserver:/x /data nfs4 rw 0 0\n",
+        );
+        assert_eq!(asked, vec![PathBuf::from("/")]);
+    }
+
+    #[test]
+    fn only_ascii_whitespace_separates_mount_fields() {
+        let asked = queried("/dev/sda1 /mnt/a\u{a0}b ext4 rw 0 0\n".as_bytes());
+        assert_eq!(asked, vec![PathBuf::from("/mnt/a\u{a0}b")]);
+    }
+
+    #[test]
+    fn one_undecodable_record_does_not_lose_the_others() {
+        let asked = queried(b"/dev/sda1 / ext4 rw 0 0\n/dev/sdb1 /mnt/\xff ext4 rw 0 0\n");
+        assert_eq!(asked, vec![PathBuf::from("/")]);
+    }
+
     #[test]
     fn only_block_device_mounts_are_queried_for_space() {
         let tree = tempfile::tempdir().unwrap();

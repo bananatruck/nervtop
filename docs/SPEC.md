@@ -77,7 +77,7 @@ Each sample returns `Reading::Available(value)` or `Reading::Unavailable(reason)
 | Load average | `sysinfo::System::load_average` | Always available on Linux |
 | CPU frequency | `sysinfo` per-core frequency | Hidden when every core reports 0 MHz |
 | Memory and swap | `sysinfo` memory | Swap shows "none configured" when total swap is 0 |
-| Disks | `/proc/self/mounts` filtered to `/dev` block devices, then `statvfs(3)` for space, and `/proc/diskstats` for read and write rates | Network and FUSE mounts are never queried, so an unresponsive server cannot block sampling; one entry per device (the shortest mount point); rates are unavailable until two samples exist |
+| Disks | `/proc/self/mounts` filtered to `/dev` block devices that are not FUSE (`fuseblk`, `fuse.*`) and not covered by a later mount at the same path, then `statvfs(3)` for space, and `/proc/diskstats` for read and write rates | Network and FUSE mounts are never queried, so an unresponsive server cannot block sampling; a mount record that is not valid UTF-8 is skipped on its own; one entry per device (the shortest mount point); rates are unavailable until two samples exist |
 | Network | `sysinfo::Networks` byte counters | Rates unavailable until two samples exist; loopback and interfaces that have never sent or received a byte are hidden |
 | Processes | `sysinfo` processes with CPU and memory refresh only | Users resolve through `sysinfo::Users`; unknown UIDs show the number |
 | Temperatures | `/sys/class/hwmon/*/temp*_input` with labels and `crit` values | Unavailable when no readable sensor exists |

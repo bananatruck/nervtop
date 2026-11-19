@@ -280,8 +280,14 @@ mod tests {
         assert!(second.disks.is_available());
         assert!(second.network.is_available());
         assert!(second.processes.is_available());
-        assert!(second.sensors.is_available());
-        assert!(second.gpus.is_available());
-        assert!(second.battery.is_available());
+        assert!(
+            second.sensors.is_available() || second.sensors.reason() == Some("no hwmon sensors")
+        );
+        assert!(
+            second.gpus.is_available() || second.gpus.reason() == Some("no display adapters found")
+        );
+        assert!(
+            second.battery.is_available() || second.battery.reason() == Some("no battery present")
+        );
     }
 }

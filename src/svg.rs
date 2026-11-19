@@ -514,10 +514,19 @@ fn xml_escape(s: &str) -> String {
             '>' => out.push_str("&gt;"),
             '"' => out.push_str("&quot;"),
             '\'' => out.push_str("&apos;"),
-            _ => out.push(ch),
+            _ if is_xml_char(ch) => out.push(ch),
+            // XML 1.0 cannot represent this character even escaped.
+            _ => out.push('\u{FFFD}'),
         }
     }
     out
+}
+
+/// The XML 1.0 `Char` production: tab, newline, carriage return and every
+/// scalar value from U+0020 except U+FFFE and U+FFFF (surrogates cannot
+/// occur in a Rust `char`).
+fn is_xml_char(ch: char) -> bool {
+    matches!(ch, '\t' | '\n' | '\r' | '\u{20}'..='\u{FFFD}' | '\u{10000}'..)
 }
 
 #[cfg(test)]
@@ -684,6 +693,23 @@ mod tests {
         let text_line = svg.lines().find(|l| l.starts_with("<text")).unwrap();
         assert!(text_line.contains(&format!(r#"fill="{page_bg}""#)), "{svg}");
         assert!(svg.contains(r##"fill="#cd0000"/>"##), "{svg}");
+    }
+
+    #[test]
+    fn xml_forbidden_characters_become_replacement_characters() {
+        let mut buf = empty_buf(3, 1);
+        buf[(0, 0)].set_symbol("a");
+        buf[(1, 0)].set_symbol("\u{FFFF}");
+        buf[(2, 0)].set_symbol("\u{FFFE}");
+        let svg = buffer_to_svg(&buf, &nerv_palette());
+        assert!(!svg.contains('\u{FFFF}'), "{svg}");
+        assert!(!svg.contains('\u{FFFE}'), "{svg}");
+        assert!(svg.contains("a\u{FFFD}\u{FFFD}"), "{svg}");
+        // A buffer cell cannot hold a C0 control (ratatui rejects them), so
+        // the escaper is checked directly for those.
+        assert_eq!(xml_escape("a\u{1}b\u{1F}"), "a\u{FFFD}b\u{FFFD}");
+        assert_eq!(xml_escape("tab\there\n\r"), "tab\there\n\r");
+        assert_eq!(xml_escape("\u{10000}\u{E000}"), "\u{10000}\u{E000}");
     }
 
     #[test]

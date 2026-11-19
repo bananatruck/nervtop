@@ -87,8 +87,8 @@ Below 80x24 nervtop shows the current size and the minimum, and keeps sampling s
 | `s` | Cycle the process sort: CPU, memory, PID, name |
 | `r` | Reverse the sort |
 | `/` | Filter processes by name; `Enter` keeps the filter, `Esc` clears it |
-| `j`, `k`, arrows | Move the process selection |
-| `PgUp`, `PgDn`, `g`, `G` | Page up, page down, top, bottom |
+| `j`, `k`, arrows | Move the process selection or scroll diagnostics |
+| `PgUp`, `PgDn`, `g`, `G` | Page up, page down, top, bottom of processes or diagnostics |
 | `a` | Acknowledge alerts: the banner drops its warning stripes and keeps only its label until a rule rises to a higher level |
 
 While the help overlay is open, the next key only closes it.
@@ -218,10 +218,11 @@ When something cannot be read, nervtop shows `unavailable` and the reason, never
 
 | Data | Source |
 | --- | --- |
-| CPU usage, load, frequency, memory, swap, processes, users | [`sysinfo`](https://crates.io/crates/sysinfo) |
+| CPU usage, load, frequency, processes, users | [`sysinfo`](https://crates.io/crates/sysinfo) |
+| Memory and swap | `/proc/meminfo`, with current-read failure detection |
 | Disk space | `/proc/self/mounts` filtered to block devices, then `statvfs(3)`, one entry per device; network and FUSE mounts are never queried, so a hung server cannot freeze nervtop |
 | Disk read and write rates | `/proc/diskstats` |
-| Network rates and totals | `sysinfo` network counters, loopback and never-used interfaces hidden |
+| Network rates and totals | `/sys/class/net` interface indices and byte counters; raw names stay distinct, loopback and never-used interfaces hidden |
 | Temperatures and fans | `/sys/class/hwmon` |
 | AMD GPU | `gpu_busy_percent`, `mem_info_vram_*` and hwmon files of the PCI device |
 | NVIDIA GPU | `nvidia-smi --query-gpu`, at most once every 2 seconds, with a 2 second timeout |

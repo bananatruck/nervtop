@@ -9,6 +9,7 @@ pub struct Processes {
     users: Option<Users>,
     users_at: Instant,
     warmed: bool,
+    samples: u64,
 }
 impl Default for Processes {
     fn default() -> Self {
@@ -17,6 +18,7 @@ impl Default for Processes {
             users: Users::new_with_refreshed_list().ok(),
             users_at: Instant::now(),
             warmed: false,
+            samples: 0,
         }
     }
 }
@@ -27,9 +29,11 @@ impl Source for Processes {
             return Reading::unavailable("process initialization failed");
         };
         // UID is fetched once for new processes. No command, environment, disk or path refresh.
-        s.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh_kind());
-        if !std::mem::replace(&mut self.warmed, true) {
-            return Reading::unavailable("warming up");
+        let kind = refresh_kind(self.samples);
+        self.samples = self.samples.wrapping_add(1);
+        let updated = s.refresh_processes_specifics(ProcessesToUpdate::All, true, kind);
+        if let Err(reason) = scan_outcome(updated, &mut self.warmed) {
+            return Reading::unavailable(reason);
         }
         let missed = s
             .processes()
@@ -76,13 +80,38 @@ impl Source for Processes {
         Reading::Available(out)
     }
 }
-/// CPU and memory for every process, the user only for new ones.
-fn refresh_kind() -> ProcessRefreshKind {
+/// Every this many samples the UID of every process is read again, so a
+/// daemon that changes its UID after start shows its new user within about
+/// ten seconds at the default interval, without reading /proc/<pid>/status
+/// for every process on every sample.
+const USER_REFRESH_EVERY: u64 = 10;
+
+/// CPU and memory for every process; the UID for new processes, and for all
+/// of them every `USER_REFRESH_EVERY` samples.
+fn refresh_kind(sample: u64) -> ProcessRefreshKind {
+    let user = if sample.is_multiple_of(USER_REFRESH_EVERY) {
+        UpdateKind::Always
+    } else {
+        UpdateKind::OnlyIfNotSet
+    };
     ProcessRefreshKind::nothing()
         .with_cpu()
         .with_memory()
-        .with_user(UpdateKind::OnlyIfNotSet)
+        .with_user(user)
         .without_tasks()
+}
+
+/// A scan that updated no process means /proc could not be read: report it
+/// and start warm-up over, since CPU usage needs two good scans.
+fn scan_outcome(updated: usize, warmed: &mut bool) -> Result<(), &'static str> {
+    if updated == 0 {
+        *warmed = false;
+        return Err("process scan failed");
+    }
+    if !std::mem::replace(warmed, true) {
+        return Err("warming up");
+    }
+    Ok(())
 }
 
 fn state(s: ProcessStatus) -> &'static str {
@@ -109,10 +138,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn user_ids_are_re_read_periodically() {
+        // A daemon that drops privileges keeps its PID; its UID must be
+        // re-read eventually, without paying for it on every sample.
+        let always = (0..30)
+            .filter(|n| refresh_kind(*n).user() == UpdateKind::Always)
+            .count();
+        assert_eq!(always, 3, "every {USER_REFRESH_EVERY}th sample");
+        assert_eq!(refresh_kind(1).user(), UpdateKind::OnlyIfNotSet);
+    }
+
+    #[test]
+    fn a_failed_scan_is_unavailable_and_restarts_warm_up() {
+        let mut warmed = true;
+        assert_eq!(scan_outcome(0, &mut warmed), Err("process scan failed"));
+        assert!(!warmed);
+        assert_eq!(scan_outcome(500, &mut warmed), Err("warming up"));
+        assert_eq!(scan_outcome(500, &mut warmed), Ok(()));
+    }
+
+    #[test]
     fn refresh_skips_per_thread_task_scans() {
         // Walking /proc/<pid>/task/* for every process cost about 90 ms per
         // sample on a desktop with ~550 processes; threads are not shown.
-        let kind = refresh_kind();
+        let kind = refresh_kind(0);
         assert!(!kind.tasks());
         assert!(kind.cpu() && kind.memory());
     }

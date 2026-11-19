@@ -94,8 +94,9 @@ pub struct CpuStats {
     pub per_core: Vec<f32>,
     /// Usage of all cores together in percent, 0 to 100.
     pub total: f32,
-    /// One, five and fifteen minute load averages.
-    pub load_avg: [f64; 3],
+    /// One, five and fifteen minute load averages, read separately from usage
+    /// so a failed `/proc/loadavg` read does not hide CPU usage.
+    pub load_avg: Reading<[f64; 3]>,
     /// Average current frequency across cores in MHz, when the kernel reports it.
     pub freq_mhz: Option<u64>,
     /// CPU model name, for example "AMD Ryzen 9 8945HS".

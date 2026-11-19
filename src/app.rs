@@ -177,6 +177,8 @@ pub struct App {
     pub paused: bool,
     pub interval_ms: u64,
     pub procs: ProcessView,
+    /// Shared row offset for diagnostics tables; each table clamps to its final page.
+    pub diagnostics_offset: usize,
     /// Every rule status from the latest evaluation, in `RuleId::ALL` order.
     pub rules: Vec<RuleStatus>,
     pub consensus: Consensus,
@@ -207,6 +209,7 @@ impl App {
             show_help: false,
             paused: false,
             procs: ProcessView::default(),
+            diagnostics_offset: 0,
             rules: Vec::new(),
             consensus: Consensus::unknown(),
             log: VecDeque::new(),
@@ -214,6 +217,25 @@ impl App {
             should_quit: false,
             utc_offset_secs: None,
         }
+    }
+
+    /// Number of rows in the longest diagnostics table.
+    pub fn diagnostics_len(&self) -> usize {
+        let mut lengths = vec![
+            self.rules.len().max(crate::alert::RuleId::ALL.len()),
+            self.log.len(),
+        ];
+        if let Some(s) = &self.snapshot {
+            lengths.extend([
+                s.sensors
+                    .value()
+                    .map_or(1, |s| s.temps.len() + s.fans.len()),
+                s.gpus.value().map_or(1, Vec::len),
+                if s.battery.is_available() { 8 } else { 1 },
+                s.disks.value().map_or(1, Vec::len) + s.network.value().map_or(1, Vec::len),
+            ]);
+        }
+        lengths.into_iter().max().unwrap_or(0)
     }
 
     /// Processes after the kernel-thread setting and the name filter, in the
@@ -229,21 +251,27 @@ impl App {
             .filter(|p| !(hide_kernel && p.kernel_thread))
             .filter(|p| needle.is_empty() || p.name.to_lowercase().contains(&needle))
             .collect();
-        let key = self.procs.sort;
-        out.sort_by(|a, b| {
-            let ord = match key {
-                SortKey::Cpu => a.cpu_percent.total_cmp(&b.cpu_percent),
-                SortKey::Memory => a.memory_bytes.cmp(&b.memory_bytes),
-                SortKey::Pid => a.pid.cmp(&b.pid),
-                SortKey::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
-            };
-            let ord = if self.procs.descending {
-                ord.reverse()
-            } else {
-                ord
-            };
-            ord.then(a.pid.cmp(&b.pid))
-        });
+        use std::cmp::Reverse;
+        match (self.procs.sort, self.procs.descending) {
+            (SortKey::Name, true) => {
+                out.sort_by_cached_key(|p| (Reverse(p.name.to_lowercase()), p.pid))
+            }
+            (SortKey::Name, false) => out.sort_by_cached_key(|p| (p.name.to_lowercase(), p.pid)),
+            (SortKey::Memory, true) => out.sort_by_key(|p| (Reverse(p.memory_bytes), p.pid)),
+            (SortKey::Memory, false) => out.sort_by_key(|p| (p.memory_bytes, p.pid)),
+            (SortKey::Pid, true) => out.sort_by_key(|p| Reverse(p.pid)),
+            (SortKey::Pid, false) => out.sort_by_key(|p| p.pid),
+            (SortKey::Cpu, true) => out.sort_by(|a, b| {
+                b.cpu_percent
+                    .total_cmp(&a.cpu_percent)
+                    .then(a.pid.cmp(&b.pid))
+            }),
+            (SortKey::Cpu, false) => out.sort_by(|a, b| {
+                a.cpu_percent
+                    .total_cmp(&b.cpu_percent)
+                    .then(a.pid.cmp(&b.pid))
+            }),
+        }
         out
     }
 
@@ -336,6 +364,9 @@ impl App {
         }
         self.utc_offset_secs = crate::clock::local_offset_secs((s.taken_at_ms / 1000) as i64);
         self.snapshot = Some(s);
+        self.diagnostics_offset = self
+            .diagnostics_offset
+            .min(self.diagnostics_len().saturating_sub(1));
         self.clamp_selection(old_index);
     }
 
@@ -353,6 +384,14 @@ impl App {
     }
 
     fn clamp_selection(&mut self, fallback: usize) {
+        // Missing data does not establish that the selected process exited.
+        if self
+            .snapshot
+            .as_ref()
+            .is_some_and(|s| !s.processes.is_available())
+        {
+            return;
+        }
         let list = self.visible_processes();
         let len = list.len();
         let index = list
@@ -360,6 +399,10 @@ impl App {
             .position(|p| Some(p.pid) == self.procs.selected_pid)
             .unwrap_or(fallback.min(len.saturating_sub(1)));
         self.procs.selected_pid = list.get(index).map(|p| p.pid);
+        self.scroll_process_selection(index, len);
+    }
+
+    fn scroll_process_selection(&mut self, index: usize, len: usize) {
         self.procs.offset = self
             .procs
             .offset
@@ -377,6 +420,7 @@ impl App {
             self.screen,
             self.show_help,
             self.procs.clone(),
+            self.diagnostics_offset,
             self.acknowledged,
             self.theme,
         );
@@ -385,6 +429,7 @@ impl App {
             self.screen,
             self.show_help,
             self.procs.clone(),
+            self.diagnostics_offset,
             self.acknowledged,
             self.theme,
         );
@@ -501,9 +546,38 @@ impl App {
                 self.procs.filter.clear();
                 self.clamp_selection(0);
             }
+            K::Char('j' | 'k' | 'g' | 'G') | K::Down | K::Up | K::PageDown | K::PageUp
+                if self.screen == Screen::Diagnostics =>
+            {
+                let last = self.diagnostics_len().saturating_sub(1);
+                self.diagnostics_offset = match key.code {
+                    K::Char('j') | K::Down => self.diagnostics_offset.saturating_add(1),
+                    K::Char('k') | K::Up => self.diagnostics_offset.saturating_sub(1),
+                    K::PageDown => self
+                        .diagnostics_offset
+                        .saturating_add(self.page_size.max(1)),
+                    K::PageUp => self
+                        .diagnostics_offset
+                        .saturating_sub(self.page_size.max(1)),
+                    K::Char('g') => 0,
+                    _ => last,
+                }
+                .min(last);
+            }
             K::Char('j' | 'k' | 'g' | 'G') | K::Down | K::Up | K::PageDown | K::PageUp => {
-                let len = self.visible_processes().len();
-                let i = self.selected_index();
+                if self
+                    .snapshot
+                    .as_ref()
+                    .is_some_and(|s| !s.processes.is_available())
+                {
+                    return Effect::None;
+                }
+                let list = self.visible_processes();
+                let len = list.len();
+                let i = list
+                    .iter()
+                    .position(|p| Some(p.pid) == self.procs.selected_pid)
+                    .unwrap_or(0);
                 let index = match key.code {
                     K::Char('j') | K::Down => i.saturating_add(1),
                     K::Char('k') | K::Up => i.saturating_sub(1),
@@ -513,8 +587,8 @@ impl App {
                     _ => len.saturating_sub(1),
                 }
                 .min(len.saturating_sub(1));
-                self.procs.selected_pid = self.visible_processes().get(index).map(|p| p.pid);
-                self.clamp_selection(index);
+                self.procs.selected_pid = list.get(index).map(|p| p.pid);
+                self.scroll_process_selection(index, len);
             }
             _ => return Effect::None,
         }

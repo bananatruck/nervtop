@@ -82,10 +82,10 @@ pub fn draw_cpu(frame: &mut Frame, area: Rect, app: &App) {
     let w = inner.width as usize;
     let sep = if w >= 44 { "  " } else { " " };
     let tot_s = fmt::percent(cpu.total as f64);
-    let load_s = format!(
-        "{:.2} {:.2} {:.2}",
-        cpu.load_avg[0], cpu.load_avg[1], cpu.load_avg[2]
-    );
+    let load_s = match &cpu.load_avg {
+        Reading::Available(l) => format!("{:.2} {:.2} {:.2}", l[0], l[1], l[2]),
+        Reading::Unavailable(_) => "unavailable".to_owned(),
+    };
     let mut summary_len = 4 + tot_s.len() + sep.len() + 5 + load_s.len();
     let mut summary = vec![
         Span::styled("TOT ", muted),

@@ -22,7 +22,7 @@ fn snapshot() -> Snapshot {
         cpu: Reading::Available(CpuStats {
             total: 10.,
             per_core: vec![10., 10.],
-            load_avg: [1., 2., 3.],
+            load_avg: Reading::Available([1., 2., 3.]),
             freq_mhz: None,
             brand: None,
         }),
@@ -1195,4 +1195,57 @@ fn a_pause_restarts_pending_sustain() {
     a.apply_snapshot(hot(5));
     let cpu = a.rules.iter().find(|r| r.rule == RuleId::CpuUsage).unwrap();
     assert_eq!(cpu.level, Level::Critical);
+}
+
+#[test]
+fn unavailable_process_scan_keeps_selection_until_a_successful_scan() {
+    let mut a = app();
+    a.apply_snapshot(processes(&[1, 2, 3]));
+    key(&mut a, K::Char('G'));
+    let selected = a.procs.selected_pid;
+    let mut failed = snapshot();
+    failed.processes = Reading::unavailable("process scan failed");
+    a.apply_snapshot(failed);
+    assert_eq!(a.procs.selected_pid, selected);
+    a.set_page_size(1);
+    key(&mut a, K::Down);
+    assert_eq!(a.procs.selected_pid, selected);
+    a.apply_snapshot(processes(&[1, 2, 3]));
+    assert_eq!(a.procs.selected_pid, selected);
+    a.apply_snapshot(processes(&[]));
+    assert_eq!(a.procs.selected_pid, None);
+}
+
+#[test]
+fn name_sort_keeps_pid_ties_ascending_in_both_directions() {
+    let mut a = app();
+    let mut s = processes(&[3, 2, 1]);
+    if let Reading::Available(list) = &mut s.processes {
+        for p in list {
+            p.name = match p.pid {
+                1 => "Alpha",
+                2 => "alpha",
+                _ => "Beta",
+            }
+            .into();
+        }
+    }
+    a.apply_snapshot(s);
+    a.procs.sort = SortKey::Name;
+    a.procs.descending = false;
+    assert_eq!(
+        a.visible_processes()
+            .iter()
+            .map(|p| p.pid)
+            .collect::<Vec<_>>(),
+        [1, 2, 3]
+    );
+    key(&mut a, K::Char('r'));
+    assert_eq!(
+        a.visible_processes()
+            .iter()
+            .map(|p| p.pid)
+            .collect::<Vec<_>>(),
+        [3, 1, 2]
+    );
 }

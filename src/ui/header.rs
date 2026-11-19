@@ -240,6 +240,25 @@ pub fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
+    if app.screen == Screen::Diagnostics {
+        let line = Line::from(vec![
+            Span::styled(" j/k ", key_style),
+            Span::styled("scroll  ", base_style),
+            Span::styled("PgUp/PgDn ", key_style),
+            Span::styled("page  ", base_style),
+            Span::styled("g/G ", key_style),
+            Span::styled("top/end  ", base_style),
+            Span::styled("1-3 ", key_style),
+            Span::styled("screen  ", base_style),
+            Span::styled("? ", key_style),
+            Span::styled("help  ", base_style),
+            Span::styled("q ", key_style),
+            Span::styled("quit", base_style),
+        ]);
+        frame.render_widget(Paragraph::new(line).style(base_style), area);
+        return;
+    }
+
     let pairs: &[(&str, &str)] = if area.width < 100 {
         &[
             ("1-3/Tab", "scr "),

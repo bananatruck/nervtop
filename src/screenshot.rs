@@ -60,20 +60,28 @@ pub fn write_file(path: &std::path::Path, contents: &str) -> std::io::Result<()>
     let name = path
         .file_name()
         .ok_or_else(|| std::io::Error::other("screenshot path has no file name"))?;
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
     let tmp = dir.join(format!(
-        ".{}.{}.tmp",
+        ".{}.{}.{}.{}.tmp",
         name.to_string_lossy(),
-        std::process::id()
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        nanos
     ));
-    let result = (|| {
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp)?;
-        f.write_all(contents.as_bytes())?;
-        f.sync_all()?;
-        std::fs::rename(&tmp, path)
-    })();
+    // create_new fails if the name exists, and only a file this call created
+    // is ever removed.
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)?;
+    let result = f
+        .write_all(contents.as_bytes())
+        .and_then(|()| f.sync_all())
+        .and_then(|()| std::fs::rename(&tmp, path));
     if result.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
@@ -90,6 +98,19 @@ pub fn svg(app: &mut App, width: u16, height: u16) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn an_unrelated_leftover_temp_file_is_never_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("shot.svg");
+        // A file with the old fixed temporary name must survive.
+        let old = dir
+            .path()
+            .join(format!(".shot.svg.{}.tmp", std::process::id()));
+        std::fs::write(&old, "someone else's").unwrap();
+        write_file(&path, "<svg/>").unwrap();
+        assert_eq!(std::fs::read_to_string(&old).unwrap(), "someone else's");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "<svg/>");
+    }
     #[test]
     fn write_replaces_a_symlink_instead_of_following_it() {
         let dir = tempfile::tempdir().unwrap();

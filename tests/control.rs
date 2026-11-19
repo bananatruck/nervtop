@@ -22,7 +22,7 @@ fn snapshot() -> Snapshot {
         cpu: Reading::Available(CpuStats {
             total: 10.,
             per_core: vec![10., 10.],
-            load_avg: [1., 2., 3.],
+            load_avg: Reading::Available([1., 2., 3.]),
             freq_mhz: None,
             brand: None,
         }),

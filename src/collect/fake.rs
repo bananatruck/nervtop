@@ -63,7 +63,7 @@ pub fn sample_snapshot() -> Snapshot {
         cpu: A(CpuStats {
             per_core: vec![24.0; 16],
             total: 24.0,
-            load_avg: [1.2, 1.4, 1.1],
+            load_avg: Reading::Available([1.2, 1.4, 1.1]),
             freq_mhz: Some(3200),
             brand: Some("Test 16-core CPU".into()),
         }),

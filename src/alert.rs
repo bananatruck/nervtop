@@ -454,13 +454,14 @@ fn inputs(s: &Snapshot, rule: RuleId) -> Vec<Input> {
     };
     match rule {
         RuleId::CpuUsage => single(s.cpu.value().map(|c| c.total as f64), s.cpu.reason()),
-        RuleId::Load => single(
-            s.cpu
-                .value()
-                .filter(|c| !c.per_core.is_empty())
-                .map(|c| c.load_avg[0] / c.per_core.len() as f64),
-            s.cpu.reason().or(Some("no cpu cores")),
-        ),
+        RuleId::Load => match &s.cpu {
+            crate::model::Reading::Unavailable(r) => single(None, Some(r)),
+            crate::model::Reading::Available(c) => match (&c.load_avg, c.per_core.len()) {
+                (crate::model::Reading::Unavailable(r), _) => single(None, Some(r)),
+                (_, 0) => single(None, Some("no cpu cores")),
+                (crate::model::Reading::Available(l), n) => single(Some(l[0] / n as f64), None),
+            },
+        },
         RuleId::Memory => single(
             s.memory.value().and_then(|m| m.used_percent()),
             s.memory.reason().or(Some("zero memory total")),
@@ -583,6 +584,24 @@ mod tests {
             .iter()
             .find(|r| r.rule == RuleId::CpuTemp)
             .expect("cpu_temp evaluated")
+    }
+
+    #[test]
+    fn unavailable_load_average_leaves_cpu_usage_judged() {
+        let mut snap = crate::collect::fake::sample_snapshot();
+        if let crate::model::Reading::Available(c) = &mut snap.cpu {
+            c.load_avg = crate::model::Reading::unavailable("loadavg not readable");
+        }
+        let eval = AlertEngine::default().evaluate(&snap, &crate::config::AlertConfig::default());
+        let usage = eval
+            .rules
+            .iter()
+            .find(|r| r.rule == RuleId::CpuUsage)
+            .unwrap();
+        let load = eval.rules.iter().find(|r| r.rule == RuleId::Load).unwrap();
+        assert!(usage.value.is_some());
+        assert_eq!(load.level, Level::Unknown);
+        assert_eq!(load.note.as_deref(), Some("loadavg not readable"));
     }
 
     #[test]

@@ -61,7 +61,7 @@ pub fn nominal_app() -> App {
         cpu: Reading::Available(CpuStats {
             per_core,
             total: 30.8,
-            load_avg: [1.42, 1.18, 0.95],
+            load_avg: Reading::Available([1.42, 1.18, 0.95]),
             freq_mhz: Some(3850),
             brand: Some("AMD Ryzen 9 8945HS".into()),
         }),

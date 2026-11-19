@@ -120,10 +120,9 @@ pub fn text(s: &Snapshot, eval: &Evaluation) -> String {
             field(
                 &mut out,
                 "load average",
-                format!(
-                    "{:.2} {:.2} {:.2}",
-                    c.load_avg[0], c.load_avg[1], c.load_avg[2]
-                ),
+                reading(&c.load_avg, |l| {
+                    format!("{:.2} {:.2} {:.2}", l[0], l[1], l[2])
+                }),
             );
             field(
                 &mut out,

@@ -145,6 +145,9 @@ impl Source for Disks {
             let Some(device) = device_name(&self.root, path) else {
                 continue;
             };
+            // Btrfs subvolumes share filesystem capacity; keep one pool per device.
+            // Linux btrfs_statfs uses fs_info for capacity, not the subvolume:
+            // https://github.com/torvalds/linux/blob/v6.12/fs/btrfs/super.c#L1631-L1726
             if chosen
                 .get(&device)
                 .is_some_and(|(m, _)| m.len() <= mount_point.len())

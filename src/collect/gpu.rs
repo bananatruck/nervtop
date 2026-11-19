@@ -654,7 +654,7 @@ mod tests {
         assert_eq!(
             SystemCommandRunner::default()
                 .run(
-                    "/bin/sh",
+                    "sh",
                     &["-c", "printf %s \"$LC_ALL\""],
                     Duration::from_secs(2)
                 )
@@ -713,7 +713,7 @@ mod tests {
         assert_eq!(
             runner
                 .run(
-                    "/usr/bin/head",
+                    "head",
                     &["-c", "65537", "/dev/zero"],
                     Duration::from_secs(2)
                 )
@@ -727,7 +727,7 @@ mod tests {
         let start = Instant::now();
         assert_eq!(
             SystemCommandRunner::default()
-                .run("/usr/bin/yes", &[], Duration::from_secs(2))
+                .run("yes", &[], Duration::from_secs(2))
                 .err()
                 .as_deref(),
             Some("nvidia-smi output too large")
@@ -1053,13 +1053,11 @@ mod tests {
     fn real_runner_handles_success_failure_missing_and_timeout() {
         let mut r = SystemCommandRunner::default();
         assert_eq!(
-            r.run("/bin/echo", &["hello"], Duration::from_secs(2))
-                .unwrap(),
+            r.run("echo", &["hello"], Duration::from_secs(2)).unwrap(),
             "hello\n"
         );
         assert_eq!(
-            r.run("/bin/false", &[], Duration::from_secs(2))
-                .unwrap_err(),
+            r.run("false", &[], Duration::from_secs(2)).unwrap_err(),
             "nvidia-smi non-zero exit"
         );
         assert_eq!(
@@ -1068,7 +1066,7 @@ mod tests {
             "nvidia-smi not found"
         );
         assert_eq!(
-            r.run("/bin/sleep", &["2"], Duration::from_millis(20))
+            r.run("sleep", &["2"], Duration::from_millis(20))
                 .unwrap_err(),
             "nvidia-smi timeout"
         );
@@ -1076,7 +1074,7 @@ mod tests {
         let start = Instant::now();
         assert_eq!(
             r.run(
-                "/bin/sh",
+                "sh",
                 &["-c", "sleep 3 & echo hi"],
                 Duration::from_millis(100)
             )

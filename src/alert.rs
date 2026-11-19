@@ -253,6 +253,15 @@ pub struct Evaluation {
 }
 
 impl AlertEngine {
+    /// Forgets partly counted sustain samples, keeping current levels, so
+    /// samples on both sides of a pause are not counted as consecutive.
+    pub fn reset_pending(&mut self) {
+        for s in self.states.values_mut() {
+            s.warn_samples = 0;
+            s.crit_samples = 0;
+        }
+    }
+
     pub fn evaluate(&mut self, snapshot: &Snapshot, config: &AlertConfig) -> Evaluation {
         let mut rules = Vec::new();
         let mut events = Vec::new();

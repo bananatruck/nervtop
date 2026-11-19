@@ -1036,16 +1036,24 @@ fn full_report_nested_fields() {
     s.battery = Reading::Available(battery(10., BatteryStatus::Discharging));
     let e = AlertEngine::default().evaluate(&s, &instant());
     let out = report::text(&s, &e);
-    let line = |key: &str| {
-        out.lines()
+    // Look a key up only inside its own section: GPU and battery both have
+    // a "power" line.
+    let line = |section: &str, key: &str| {
+        let start = out
+            .find(&format!("\n{section}\n"))
+            .unwrap_or_else(|| panic!("no {section} section in:\n{out}"));
+        let body = &out[start + section.len() + 2..];
+        let body = &body[..body.find("\n\n").unwrap_or(body.len())];
+        body.lines()
             .find(|l| l.trim_start().starts_with(key))
-            .unwrap_or_else(|| panic!("no {key} line in:\n{out}"))
+            .unwrap_or_else(|| panic!("no {key} line in {section}:\n{out}"))
             .to_owned()
     };
-    assert!(line("memory used").ends_with("unavailable (memory missing)"));
-    assert!(line("power").ends_with("unavailable (power missing)"));
-    assert!(line("time remaining").ends_with("unavailable (no rate)"));
-    assert!(line("health").ends_with("unavailable (no design)"));
+    assert!(line("GPU", "memory used").ends_with("unavailable (memory missing)"));
+    assert!(line("GPU", "power").ends_with("unavailable (power missing)"));
+    assert!(line("BATTERY", "power").ends_with("unavailable (no power)"));
+    assert!(line("BATTERY", "time remaining").ends_with("unavailable (no rate)"));
+    assert!(line("BATTERY", "health").ends_with("unavailable (no design)"));
 }
 #[test]
 fn ineffective_keys_do_not_redraw() {
@@ -1124,4 +1132,67 @@ fn cli_errors_stay_on_one_line() {
     assert!(!error.to_string().contains('\n'));
     let error = cli::parse(["--theme=bad\r\nname".to_owned()]).unwrap_err();
     assert!(!error.to_string().contains(['\n', '\r']));
+}
+
+fn iface(name: &str, rx: Reading<f64>) -> NetInterface {
+    NetInterface {
+        name: name.into(),
+        rx_bps: rx,
+        tx_bps: Reading::Available(1.),
+        rx_total_bytes: 10,
+        tx_total_bytes: 10,
+    }
+}
+#[test]
+fn partial_throughput_is_not_recorded_as_a_total() {
+    let mut a = app();
+    let mut s = snapshot();
+    s.network = Reading::Available(vec![
+        iface("eth0", Reading::Available(5.)),
+        iface("wlan0", Reading::unavailable("warming up")),
+    ]);
+    a.apply_snapshot(s.clone());
+    assert!(a.history.net_rx_bps.is_empty(), "5 B/s is not the total");
+    assert_eq!(a.history.net_tx_bps.last(), Some(2.), "tx is complete");
+    s.network = Reading::Available(vec![
+        iface("eth0", Reading::Available(5.)),
+        iface("wlan0", Reading::Available(0.)),
+    ]);
+    a.apply_snapshot(s);
+    assert_eq!(a.history.net_rx_bps.last(), Some(5.));
+}
+#[test]
+fn slash_opens_the_processes_screen_with_the_filter_editor() {
+    let mut a = app();
+    assert_eq!(a.screen, Screen::Overview);
+    key(&mut a, K::Char('/'));
+    assert_eq!(a.screen, Screen::Processes);
+    assert_eq!(a.procs.mode, InputMode::Filter);
+}
+#[test]
+fn a_pause_restarts_pending_sustain() {
+    let mut a = app();
+    let hot = |seq| {
+        let mut s = snapshot();
+        s.seq = seq;
+        if let Reading::Available(c) = &mut s.cpu {
+            c.total = 99.;
+        }
+        s
+    };
+    a.apply_snapshot(hot(1));
+    a.apply_snapshot(hot(2));
+    key(&mut a, K::Char(' '));
+    key(&mut a, K::Char(' '));
+    a.apply_snapshot(hot(3));
+    let cpu = a.rules.iter().find(|r| r.rule == RuleId::CpuUsage).unwrap();
+    assert_eq!(
+        cpu.level,
+        Level::Nominal,
+        "three samples across a pause are not consecutive"
+    );
+    a.apply_snapshot(hot(4));
+    a.apply_snapshot(hot(5));
+    let cpu = a.rules.iter().find(|r| r.rule == RuleId::CpuUsage).unwrap();
+    assert_eq!(cpu.level, Level::Critical);
 }

@@ -303,21 +303,21 @@ impl App {
         if let Some(nets) = s.network.value() {
             push_sum(
                 &mut self.history.net_rx_bps,
-                nets.iter().filter_map(|n| n.rx_bps.value().copied()),
+                nets.iter().map(|n| n.rx_bps.value().copied()),
             );
             push_sum(
                 &mut self.history.net_tx_bps,
-                nets.iter().filter_map(|n| n.tx_bps.value().copied()),
+                nets.iter().map(|n| n.tx_bps.value().copied()),
             );
         }
         if let Some(disks) = s.disks.value() {
             push_sum(
                 &mut self.history.disk_read_bps,
-                disks.iter().filter_map(|d| d.read_bps.value().copied()),
+                disks.iter().map(|d| d.read_bps.value().copied()),
             );
             push_sum(
                 &mut self.history.disk_write_bps,
-                disks.iter().filter_map(|d| d.write_bps.value().copied()),
+                disks.iter().map(|d| d.write_bps.value().copied()),
             );
         }
         if let Some(gpus) = s.gpus.value() {
@@ -449,6 +449,7 @@ impl App {
             }
             K::Char(' ') => {
                 self.paused = !self.paused;
+                self.engine.reset_pending();
                 return Effect::PauseChanged(self.paused);
             }
             K::Char(c @ ('+' | '-')) => {
@@ -489,7 +490,11 @@ impl App {
                 self.procs.descending = !self.procs.descending;
                 self.clamp_selection(0);
             }
-            K::Char('/') => self.procs.mode = InputMode::Filter,
+            K::Char('/') => {
+                // The filter editor lives on the processes screen.
+                self.screen = Screen::Processes;
+                self.procs.mode = InputMode::Filter;
+            }
             K::Char('a') => self.acknowledged = true,
             K::Esc => {
                 // A filter kept with Enter stays until Esc clears it.
@@ -517,8 +522,11 @@ impl App {
     }
 }
 
-fn push_sum(series: &mut Series, values: impl Iterator<Item = f64>) {
-    if let Some(sum) = values.reduce(|a, b| a + b) {
+/// Records the sum only when every source reported a value: a sum over
+/// some sources is not a total.
+fn push_sum(series: &mut Series, values: impl Iterator<Item = Option<f64>>) {
+    let values: Option<Vec<f64>> = values.collect();
+    if let Some(sum) = values.and_then(|v| v.into_iter().reduce(|a, b| a + b)) {
         series.push(sum);
     }
 }

@@ -1,5 +1,9 @@
 //! Local wall-clock time without a date-time dependency.
 
+unsafe extern "C" {
+    fn tzset();
+}
+
 /// The local UTC offset in seconds at `epoch_secs`, from the C library's
 /// time zone database (honours `TZ` and `/etc/localtime`).
 pub fn local_offset_secs(epoch_secs: i64) -> Option<i32> {
@@ -7,6 +11,10 @@ pub fn local_offset_secs(epoch_secs: i64) -> Option<i32> {
     // SAFETY: `tm` is plain old data that `localtime_r` fully initialises on
     // success; on failure it returns null and we do not read `tm`.
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    // localtime_r need not re-read the time zone; tzset makes a change to
+    // /etc/localtime (for example after travelling) show up while running.
+    // SAFETY: tzset takes no arguments and only updates libc's zone state.
+    unsafe { tzset() };
     let result = unsafe { libc::localtime_r(&t, &mut tm) };
     if result.is_null() {
         None
@@ -38,6 +46,8 @@ mod tests {
     #[test]
     fn offset_is_within_a_day() {
         let off = local_offset_secs(1_795_420_500).expect("libc reports an offset");
-        assert!(off.abs() <= 14 * 3600, "{off}");
+        // glibc accepts TZ offsets beyond the real-world 14 h (TZ=ABC-15),
+        // so only the C library's own limit is a safe bound here.
+        assert!(off.abs() < 25 * 3600, "{off}");
     }
 }

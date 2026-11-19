@@ -205,22 +205,28 @@ pub fn run(collector: Collector, mut app: App) -> io::Result<()> {
         // Paint the frame immediately; panels say "acquiring" until the
         // warm-up sample arrives about 250 ms later.
         draw(&mut terminal, &mut app)?;
-        loop {
-            let event = events_rx
+        'events: loop {
+            let first = events_rx
                 .recv()
                 .map_err(|_| io::Error::other("collector stopped"))?;
-            match step(&mut app, event)? {
-                Step::Idle => continue,
-                Step::Quit => break,
-                Step::Interval(ms) => control_tx
-                    .send(Control::Interval(ms))
-                    .map_err(|_| io::Error::other("collector stopped"))?,
-                Step::Pause(p) => control_tx
-                    .send(Control::Pause(p))
-                    .map_err(|_| io::Error::other("collector stopped"))?,
-                Step::Draw => (),
+            let mut redraw = false;
+            for event in drain_ready(first, &events_rx) {
+                match step(&mut app, event)? {
+                    Step::Idle => continue,
+                    Step::Quit => break 'events,
+                    Step::Interval(ms) => control_tx
+                        .send(Control::Interval(ms))
+                        .map_err(|_| io::Error::other("collector stopped"))?,
+                    Step::Pause(p) => control_tx
+                        .send(Control::Pause(p))
+                        .map_err(|_| io::Error::other("collector stopped"))?,
+                    Step::Draw => (),
+                }
+                redraw = true;
             }
-            draw(&mut terminal, &mut app)?;
+            if redraw {
+                draw(&mut terminal, &mut app)?;
+            }
         }
         Ok(())
     })();
@@ -239,6 +245,14 @@ fn draw(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> io::Result<()
         crate::ui::draw(frame, app);
     })?;
     Ok(())
+}
+
+/// `first` plus every event already waiting, so a burst of snapshots (for
+/// example while the terminal is slow to draw) costs one redraw, not one each.
+fn drain_ready(first: AppEvent, rx: &Receiver<AppEvent>) -> Vec<AppEvent> {
+    let mut batch = vec![first];
+    batch.extend(rx.try_iter());
+    batch
 }
 
 #[cfg(test)]
@@ -371,6 +385,22 @@ mod tests {
         control.send(Control::Quit).unwrap();
         assert!(wait_for_collector(worker, Duration::from_secs(1)));
         assert!(start.elapsed() < Duration::from_millis(500));
+    }
+    #[test]
+    fn queued_events_are_handled_before_one_redraw() {
+        let (tx, rx) = mpsc::channel();
+        for _ in 0..3 {
+            tx.send(AppEvent::Resize).unwrap();
+        }
+        tx.send(AppEvent::Quit).unwrap();
+        let batch = drain_ready(AppEvent::Resize, &rx);
+        assert_eq!(
+            batch.len(),
+            5,
+            "the first event plus everything already queued"
+        );
+        assert!(matches!(batch.last(), Some(AppEvent::Quit)));
+        assert!(rx.try_recv().is_err());
     }
     #[test]
     fn collector_control_disconnect_exits() {

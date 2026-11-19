@@ -1,4 +1,4 @@
-use super::{RateBaseline, Source, entries, number};
+use super::{RateBaseline, Source, number};
 use crate::model::{NetInterface, Reading};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -52,16 +52,21 @@ impl Source for Network {
         let now = Instant::now();
         let mut seen = BTreeSet::new();
         let mut interfaces = Vec::new();
-        for dir in entries(self.root.join("sys/class/net")) {
-            let Some(name) = dir.file_name().map(OsStr::to_owned) else {
-                continue;
+        let Ok(dirs) = std::fs::read_dir(self.root.join("sys/class/net")) else {
+            return Reading::unavailable("network inventory not readable");
+        };
+        for dir in dirs {
+            let Ok(dir) = dir else {
+                return Reading::unavailable("network inventory not readable");
             };
-            let Some(ifindex) = number::<u32>(dir.join("ifindex")) else {
-                continue;
-            };
+            let name = dir.file_name();
             if name == OsStr::new("lo") {
                 continue;
             }
+            let dir = dir.path();
+            let Some(ifindex) = number::<u32>(dir.join("ifindex")) else {
+                return Reading::unavailable("interface identity not readable");
+            };
             let rx = number::<u64>(dir.join("statistics/rx_bytes"));
             let tx = number::<u64>(dir.join("statistics/tx_bytes"));
             if rx == Some(0) && tx == Some(0) {
@@ -119,7 +124,7 @@ mod tests {
         assert!(second[0].rx_bps.is_available());
         assert!(second[0].tx_bps.is_available());
 
-        write_interface(root.path(), "eth0", 8, 5, 9);
+        write_interface(root.path(), "eth0", 8, 1100, 2200);
         let replacement_sample = network.sample();
         let replacement = replacement_sample.value().unwrap();
         assert_eq!(replacement[0].rx_bps.reason(), Some("warming up"));
@@ -183,5 +188,21 @@ mod tests {
             .collect();
 
         assert_eq!(names, ["eth\\xfe", "eth\\xff"]);
+    }
+    #[test]
+    fn unreadable_interface_inventory_is_unavailable() {
+        let root = tempfile::tempdir().unwrap();
+        let mut network = Network::new(root.path().into());
+        assert_eq!(
+            network.sample().reason(),
+            Some("network inventory not readable")
+        );
+        write_interface(root.path(), "eth0", 7, 10, 20);
+        assert!(network.sample().is_available());
+        fs::remove_file(root.path().join("sys/class/net/eth0/ifindex")).unwrap();
+        assert_eq!(
+            network.sample().reason(),
+            Some("interface identity not readable")
+        );
     }
 }

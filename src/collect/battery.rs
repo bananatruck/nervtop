@@ -12,13 +12,27 @@ impl Battery {
 impl Source for Battery {
     type Output = BatteryStats;
     fn sample(&mut self) -> Reading<BatteryStats> {
-        let supplies = entries(self.root.join("sys/class/power_supply"));
-        let mains: Vec<_> = supplies
+        let list = self.root.join("sys/class/power_supply");
+        if let Err(e) = std::fs::read_dir(&list)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            return Reading::unavailable("power supply list not readable");
+        }
+        let supplies = entries(list);
+        // Online if any mains supply says so; offline only if every one was
+        // read and says 0; unknown when a read failed.
+        let mains: Vec<Option<u8>> = supplies
             .iter()
             .filter(|d| read(d.join("type")).as_deref() == Some("Mains"))
-            .filter_map(|d| number::<u8>(d.join("online")))
+            .map(|d| number::<u8>(d.join("online")))
             .collect();
-        let ac_online = (!mains.is_empty()).then(|| mains.iter().any(|v| *v != 0));
+        let ac_online = if mains.iter().any(|v| matches!(v, Some(n) if *n != 0)) {
+            Some(true)
+        } else if !mains.is_empty() && mains.iter().all(|v| *v == Some(0)) {
+            Some(false)
+        } else {
+            None
+        };
         let Some(dir) = supplies.iter().find(|d| {
             read(d.join("type")).as_deref() == Some("Battery")
                 && number::<u8>(d.join("present")) != Some(0)
@@ -162,6 +176,31 @@ mod tests {
             ("energy_full", "10"),
         ]);
         assert!(Battery::new(t.path().into()).sample().reason().is_some());
+    }
+    #[test]
+    fn unreadable_power_supply_list_is_not_no_battery() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = tempfile::tempdir().unwrap();
+        let dir = t.path().join("sys/class/power_supply");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let r = Battery::new(t.path().into()).sample();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(r.reason(), Some("power supply list not readable"));
+    }
+    #[test]
+    fn an_unreadable_mains_supply_makes_ac_unknown_not_offline() {
+        let t = tree(&[("status", "Unknown"), ("capacity", "8")]);
+        let put = super::super::sensors::tests::put;
+        put(t.path(), "sys/class/power_supply/AC0/type", "Mains");
+        put(t.path(), "sys/class/power_supply/AC0/online", "0");
+        put(t.path(), "sys/class/power_supply/AC1/type", "Mains");
+        put(t.path(), "sys/class/power_supply/AC1/online", "garbage");
+        let b = Battery::new(t.path().into()).sample();
+        assert_eq!(b.value().unwrap().ac_online, None);
+        put(t.path(), "sys/class/power_supply/AC1/online", "1");
+        let b = Battery::new(t.path().into()).sample();
+        assert_eq!(b.value().unwrap().ac_online, Some(true));
     }
     #[test]
     fn target_charge_units() {

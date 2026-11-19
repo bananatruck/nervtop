@@ -3,11 +3,12 @@
 use crate::alert::{Level, RuleId, RuleStatus};
 use crate::app::App;
 use crate::theme::Palette;
-use crate::ui::fmt::level_color;
+use crate::ui::fmt::{self, level_color};
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
+use ratatui::text::Span;
 use ratatui::widgets::Widget;
 
 /// Character used to draw diagonal warning stripes when unacknowledged.
@@ -60,11 +61,15 @@ impl Widget for WarningStripes<'_> {
             }
         }
 
+        // Measure and cut by display width, then let `set_stringn` write
+        // whole graphemes, so a double-width character keeps its blank
+        // continuation cell instead of having the next character written
+        // into it (where the terminal would never show it).
         let padded = format!("  {}  ", self.label);
-        let chars: Vec<char> = padded.chars().collect();
         let w = area.width as usize;
-        let shown: Vec<char> = chars.into_iter().take(w).collect();
-        let start_x = area.x + (w.saturating_sub(shown.len()) / 2) as u16;
+        let shown = fit_cells(&padded, w);
+        let shown_w = fmt::display_width(&shown);
+        let start_x = area.x + (w.saturating_sub(shown_w) / 2) as u16;
         let mid_y = area.y + area.height / 2;
         let label_style = if self.acknowledged {
             Style::default()
@@ -77,16 +82,31 @@ impl Widget for WarningStripes<'_> {
                 .bg(color)
                 .add_modifier(Modifier::BOLD)
         };
-
-        for (i, ch) in shown.into_iter().enumerate() {
-            let cx = start_x.saturating_add(i as u16);
-            if cx < area.x.saturating_add(area.width) {
-                let cell = &mut buf[(cx, mid_y)];
-                cell.set_char(ch);
-                cell.set_style(label_style);
-            }
-        }
+        let label_area = Rect::new(start_x, mid_y, shown_w as u16, 1).intersection(area);
+        buf.set_style(label_area, label_style);
+        buf.set_stringn(
+            start_x,
+            mid_y,
+            &shown,
+            label_area.width as usize,
+            label_style,
+        );
     }
+}
+
+/// The longest prefix of `s` made of whole graphemes that fits in `max` cells.
+fn fit_cells(s: &str, max: usize) -> String {
+    let mut out = String::new();
+    let mut used = 0;
+    for g in Span::raw(s).styled_graphemes(Style::default()) {
+        let gw = fmt::display_width(g.symbol);
+        if used + gw > max {
+            break;
+        }
+        out.push_str(g.symbol);
+        used += gw;
+    }
+    out
 }
 
 /// Formats a `RuleStatus` value with its unit.
@@ -190,6 +210,66 @@ mod tests {
         let line = buffer_line(&buf);
         assert!(line.contains("CRITICAL  DISK /  97.0%"), "{line}");
         assert!(!line.contains(STRIPE_CHAR), "{line}");
+    }
+
+    /// Column of the first cell whose symbol is `symbol`.
+    fn column_of(buf: &Buffer, symbol: &str) -> u16 {
+        (0..buf.area.width)
+            .find(|&x| buf[(x, 0)].symbol() == symbol)
+            .unwrap_or_else(|| panic!("{symbol:?} in {:?}", buffer_line(buf)))
+    }
+
+    #[test]
+    fn wide_characters_in_the_label_keep_their_continuation_cells() {
+        let palette = Palette::builtin(ThemeName::Nerv);
+        for acknowledged in [false, true] {
+            let area = Rect::new(0, 0, 40, 1);
+            let mut buf = Buffer::empty(area);
+            WarningStripes::new(
+                "CRITICAL  DISK /mnt/数据  97.0%",
+                Level::Critical,
+                acknowledged,
+                &palette,
+            )
+            .render(area, &mut buf);
+            let first = column_of(&buf, "数");
+            assert_eq!(buf[(first + 1, 0)].symbol(), " ", "continuation after 数");
+            assert_eq!(buf[(first + 2, 0)].symbol(), "据");
+            assert_eq!(buf[(first + 3, 0)].symbol(), " ", "continuation after 据");
+            assert_eq!(buf[(first + 4, 0)].symbol(), " ");
+            assert_eq!(buf[(first + 6, 0)].symbol(), "9");
+            // "  CRITICAL  DISK /mnt/数据  97.0%  " is 35 cells wide, so it
+            // starts at column (40 - 35) / 2 = 2.
+            assert_eq!(column_of(&buf, "C"), 4);
+            assert_eq!(
+                buf[(first, 0)].bg,
+                if acknowledged {
+                    palette.surface
+                } else {
+                    palette.alert
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn wide_label_is_cut_by_display_width() {
+        let palette = Palette::builtin(ThemeName::Nerv);
+        // Six double-width characters plus padding need 16 cells; only 9 exist.
+        let area = Rect::new(0, 0, 9, 1);
+        let mut buf = Buffer::empty(area);
+        WarningStripes::new("数据数据数据", Level::Critical, true, &palette).render(area, &mut buf);
+        let line = buffer_line(&buf);
+        // Two padding cells, then three whole wide characters (six cells),
+        // each followed by its blank continuation cell, and the last cell
+        // stays blank instead of holding half a glyph.
+        assert_eq!(buf[(2, 0)].symbol(), "数", "{line:?}");
+        assert_eq!(buf[(3, 0)].symbol(), " ", "{line:?}");
+        assert_eq!(buf[(4, 0)].symbol(), "据", "{line:?}");
+        assert_eq!(buf[(5, 0)].symbol(), " ", "{line:?}");
+        assert_eq!(buf[(6, 0)].symbol(), "数", "{line:?}");
+        assert_eq!(buf[(7, 0)].symbol(), " ", "{line:?}");
+        assert_eq!(buf[(8, 0)].symbol(), " ", "{line:?}");
     }
 
     #[test]

@@ -5,8 +5,7 @@ use sysinfo::{CpuRefreshKind, MINIMUM_CPU_UPDATE_INTERVAL, System};
 
 pub struct Cpu {
     system: Option<System>,
-    /// When the first populated counter read happened; usage is measured
-    /// against it.
+    /// When the last accepted populated counter read happened.
     baseline: Option<Instant>,
 }
 impl Default for Cpu {
@@ -38,7 +37,10 @@ fn warm_up(
             Err("warming up")
         }
         Some(t) if now.duration_since(*t) < min => Err("warming up"),
-        Some(_) => Ok(()),
+        Some(_) => {
+            *baseline = Some(now);
+            Ok(())
+        }
     }
 }
 
@@ -101,6 +103,16 @@ mod tests {
             Err("warming up")
         );
         assert_eq!(warm_up(&mut baseline, t0 + MIN, true, MIN), Ok(()));
+        assert_eq!(
+            warm_up(
+                &mut baseline,
+                t0 + MIN + Duration::from_millis(50),
+                true,
+                MIN
+            ),
+            Err("warming up")
+        );
+        assert_eq!(warm_up(&mut baseline, t0 + MIN * 2, true, MIN), Ok(()));
     }
 
     #[test]

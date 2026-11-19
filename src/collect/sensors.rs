@@ -48,6 +48,10 @@ impl Source for Sensors {
                 else {
                     continue;
                 };
+                // The hwmon ABI says not to trust a channel whose fault flag is set.
+                if read(dir.join(format!("{stem}_fault"))).as_deref() == Some("1") {
+                    continue;
+                }
                 let label = read(dir.join(format!("{stem}_label")))
                     .filter(|s| !s.is_empty())
                     .unwrap_or_else(|| stem.into());
@@ -92,6 +96,24 @@ pub(crate) mod tests {
         let path = root.join(path);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, text).unwrap();
+    }
+    #[test]
+    fn faulted_channels_are_skipped() {
+        let t = tempfile::tempdir().unwrap();
+        put(t.path(), "sys/class/hwmon/hwmon0/name", "nct6775");
+        put(t.path(), "sys/class/hwmon/hwmon0/temp1_input", "127000");
+        put(t.path(), "sys/class/hwmon/hwmon0/temp1_fault", "1");
+        put(t.path(), "sys/class/hwmon/hwmon0/temp2_input", "41000");
+        put(t.path(), "sys/class/hwmon/hwmon0/temp2_fault", "0");
+        put(t.path(), "sys/class/hwmon/hwmon0/fan1_input", "0");
+        put(t.path(), "sys/class/hwmon/hwmon0/fan1_fault", "1");
+        put(t.path(), "sys/class/hwmon/hwmon0/fan2_input", "900");
+        let s = Sensors::new(t.path().into()).sample();
+        let s = s.value().unwrap();
+        assert_eq!(s.temps.len(), 1);
+        assert_eq!(s.temps[0].label, "temp2");
+        assert_eq!(s.fans.len(), 1);
+        assert_eq!(s.fans[0].rpm, 900);
     }
     #[test]
     fn suspended_devices_are_not_read() {

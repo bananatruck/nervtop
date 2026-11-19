@@ -222,7 +222,7 @@ When something cannot be read, nervtop shows `unavailable` and the reason, never
 | Memory and swap | `/proc/meminfo`, with current-read failure detection |
 | Disk space | `/proc/self/mounts` filtered to block devices, then `statvfs(3)`, one entry per device; network and FUSE mounts are never queried, so a hung server cannot freeze nervtop |
 | Disk read and write rates | `/proc/diskstats` |
-| Network rates and totals | `sysinfo` network counters, loopback and never-used interfaces hidden |
+| Network rates and totals | `/sys/class/net` interface indices and byte counters; raw names stay distinct, loopback and never-used interfaces hidden |
 | Temperatures and fans | `/sys/class/hwmon` |
 | AMD GPU | `gpu_busy_percent`, `mem_info_vram_*` and hwmon files of the PCI device |
 | NVIDIA GPU | `nvidia-smi --query-gpu`, at most once every 2 seconds, with a 2 second timeout |

@@ -89,7 +89,7 @@ const USER_REFRESH_EVERY: u64 = 10;
 /// CPU and memory for every process; the UID for new processes, and for all
 /// of them every `USER_REFRESH_EVERY` samples.
 fn refresh_kind(sample: u64) -> ProcessRefreshKind {
-    let user = if sample % USER_REFRESH_EVERY == 0 {
+    let user = if sample.is_multiple_of(USER_REFRESH_EVERY) {
         UpdateKind::Always
     } else {
         UpdateKind::OnlyIfNotSet

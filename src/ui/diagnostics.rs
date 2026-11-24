@@ -20,17 +20,20 @@ fn visible_rows(
     header: bool,
     offset: usize,
 ) -> Vec<Row<'static>> {
-    let capacity = inner.height.saturating_sub(u16::from(header)) as usize;
-    let offset = offset.min(rows.len().saturating_sub(capacity));
+    let offset = offset.min(maximum_offset(rows.len(), inner, header));
     rows.into_iter().skip(offset).collect()
 }
 
-/// Draws the DIAGNOSTICS screen using `Table` widgets for all subsystems.
-pub fn draw_diagnostics(frame: &mut Frame, area: Rect, app: &App) {
-    if area.width == 0 || area.height == 0 {
-        return;
+fn maximum_offset(rows: usize, inner: Rect, header: bool) -> usize {
+    let capacity = inner.height.saturating_sub(u16::from(header)) as usize;
+    if inner.width == 0 || capacity == 0 {
+        0
+    } else {
+        rows.saturating_sub(capacity)
     }
+}
 
+fn table_areas(area: Rect, app: &App) -> [Rect; 6] {
     let cols = if area.width < 100 {
         Layout::horizontal([Constraint::Length(31), Constraint::Min(49)]).split(area)
     } else {
@@ -98,12 +101,68 @@ pub fn draw_diagnostics(frame: &mut Frame, area: Rect, app: &App) {
     let right_rows =
         Layout::vertical([Constraint::Length(rules_box_h), Constraint::Min(4)]).split(cols[1]);
 
-    draw_sensors_table(frame, left_rows[0], app);
-    draw_gpus_table(frame, left_rows[1], app);
-    draw_battery_table(frame, left_rows[2], app);
-    draw_io_table(frame, left_rows[3], app);
-    draw_rules_table(frame, right_rows[0], app);
-    draw_events_table(frame, right_rows[1], app);
+    [
+        left_rows[0],
+        left_rows[1],
+        left_rows[2],
+        left_rows[3],
+        right_rows[0],
+        right_rows[1],
+    ]
+}
+
+/// Last shared offset that moves at least one rendered diagnostics table.
+pub fn max_offset(area: Rect, app: &App) -> usize {
+    let areas = table_areas(area, app).map(|area| panel_block("", &app.palette).inner(area));
+    let mut rows = [0; 6];
+    if let Some(snapshot) = &app.snapshot {
+        rows[0] = snapshot
+            .sensors
+            .value()
+            .map_or(0, |s| s.temps.len() + s.fans.len());
+        rows[1] = snapshot.gpus.value().map_or(0, Vec::len);
+        rows[2] = if snapshot.battery.is_available() {
+            8
+        } else {
+            0
+        };
+        rows[3] = snapshot.disks.value().map_or(1, Vec::len)
+            + snapshot.network.value().map_or(1, Vec::len);
+    }
+    rows[4] = if app.rules.is_empty() {
+        RuleId::ALL.len()
+    } else {
+        app.rules.len()
+    };
+    rows[5] = app.log.len();
+    let headers = [
+        areas[0].height >= 2,
+        areas[1].height >= 2,
+        false,
+        false,
+        areas[4].height as usize > rows[4],
+        areas[5].height >= 4,
+    ];
+    rows.into_iter()
+        .zip(areas)
+        .zip(headers)
+        .map(|((rows, area), header)| maximum_offset(rows, area, header))
+        .max()
+        .unwrap_or(0)
+}
+
+/// Draws the DIAGNOSTICS screen using `Table` widgets for all subsystems.
+pub fn draw_diagnostics(frame: &mut Frame, area: Rect, app: &App) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let [sensors, gpus, battery, io, rules, events] = table_areas(area, app);
+    draw_sensors_table(frame, sensors, app);
+    draw_gpus_table(frame, gpus, app);
+    draw_battery_table(frame, battery, app);
+    draw_io_table(frame, io, app);
+    draw_rules_table(frame, rules, app);
+    draw_events_table(frame, events, app);
 }
 
 fn draw_sensors_table(frame: &mut Frame, area: Rect, app: &App) {
@@ -924,6 +983,51 @@ mod tests {
         );
     }
     #[test]
+    fn diagnostics_bottom_tracks_resizes_and_shorter_inventories() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut app = nominal_app();
+        app.screen = Screen::Diagnostics;
+        let snapshot = app.snapshot.as_mut().unwrap();
+        let sensors = match &mut snapshot.sensors {
+            Reading::Available(sensors) => sensors,
+            _ => unreachable!(),
+        };
+        let template = sensors.temps[0].clone();
+        sensors.temps = (0..100)
+            .map(|i| crate::model::TempSensor {
+                chip: "probe".into(),
+                label: format!("{i:02}"),
+                ..template.clone()
+            })
+            .collect();
+        sensors.fans.clear();
+
+        let mut small_offset = 0;
+        for (width, height) in [(80, 24), (160, 48), (200, 60), (80, 24)] {
+            crate::screenshot::render(&mut app, width, height);
+            app.handle_key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE));
+            let bottom = crate::screenshot::render(&mut app, width, height);
+            assert!(buffer_lines(&bottom).join("\n").contains("probe:99"));
+            if width == 80 {
+                small_offset = app.diagnostics_offset;
+            } else {
+                assert!(app.diagnostics_offset < small_offset);
+            }
+            app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+            let previous = crate::screenshot::render(&mut app, width, height);
+            assert_ne!(
+                left_row(&buffer_lines(&bottom), "probe:"),
+                left_row(&buffer_lines(&previous), "probe:")
+            );
+        }
+
+        let shorter = nominal_app().snapshot.unwrap();
+        app.apply_snapshot(shorter);
+        crate::screenshot::render(&mut app, 200, 60);
+        assert_eq!(app.diagnostics_offset, 0, "all tables now fit");
+    }
+
+    #[test]
     fn diagnostics_navigation_reaches_overflow_rows_and_preserves_process_selection() {
         use crate::model::TempSensor;
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -953,13 +1057,13 @@ mod tests {
                 })
                 .collect(),
         );
-        let initial = buffer_lines(&render(&app, 80, 24)).join("\n");
+        let initial = buffer_lines(&crate::screenshot::render(&mut app, 80, 24)).join("\n");
         assert!(initial.contains("probe:00"));
         assert!(!initial.contains("probe:14"));
         let mut seen = initial;
         for _ in 0..25 {
             app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-            seen.push_str(&buffer_lines(&render(&app, 80, 24)).join("\n"));
+            seen.push_str(&buffer_lines(&crate::screenshot::render(&mut app, 80, 24)).join("\n"));
         }
         for i in 0..15 {
             assert!(
@@ -978,15 +1082,19 @@ mod tests {
         assert_eq!(app.procs.selected_pid, selected_pid);
         app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
         assert!(
-            buffer_lines(&render(&app, 80, 24))
+            buffer_lines(&crate::screenshot::render(&mut app, 80, 24))
                 .join("\n")
                 .contains("probe:00")
         );
         app.handle_key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE));
         assert!(
-            buffer_lines(&render(&app, 80, 24))
+            buffer_lines(&crate::screenshot::render(&mut app, 80, 24))
                 .join("\n")
                 .contains("probe:14")
         );
+        let bottom = buffer_lines(&crate::screenshot::render(&mut app, 80, 24));
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        let previous = buffer_lines(&crate::screenshot::render(&mut app, 80, 24));
+        assert_ne!(left_row(&bottom, "probe:"), left_row(&previous, "probe:"));
     }
 }

@@ -179,6 +179,7 @@ pub struct App {
     pub procs: ProcessView,
     /// Shared row offset for diagnostics tables; each table clamps to its final page.
     pub diagnostics_offset: usize,
+    diagnostics_max_offset: usize,
     /// Every rule status from the latest evaluation, in `RuleId::ALL` order.
     pub rules: Vec<RuleStatus>,
     pub consensus: Consensus,
@@ -210,6 +211,7 @@ impl App {
             paused: false,
             procs: ProcessView::default(),
             diagnostics_offset: 0,
+            diagnostics_max_offset: 0,
             rules: Vec::new(),
             consensus: Consensus::unknown(),
             log: VecDeque::new(),
@@ -219,23 +221,10 @@ impl App {
         }
     }
 
-    /// Number of rows in the longest diagnostics table.
-    pub fn diagnostics_len(&self) -> usize {
-        let mut lengths = vec![
-            self.rules.len().max(crate::alert::RuleId::ALL.len()),
-            self.log.len(),
-        ];
-        if let Some(s) = &self.snapshot {
-            lengths.extend([
-                s.sensors
-                    .value()
-                    .map_or(1, |s| s.temps.len() + s.fans.len()),
-                s.gpus.value().map_or(1, Vec::len),
-                if s.battery.is_available() { 8 } else { 1 },
-                s.disks.value().map_or(1, Vec::len) + s.network.value().map_or(1, Vec::len),
-            ]);
-        }
-        lengths.into_iter().max().unwrap_or(0)
+    /// Updates diagnostics navigation to the rendered table capacities.
+    pub fn set_diagnostics_max_offset(&mut self, offset: usize) {
+        self.diagnostics_max_offset = offset;
+        self.diagnostics_offset = self.diagnostics_offset.min(offset);
     }
 
     /// Processes after the kernel-thread setting and the name filter, in the
@@ -364,9 +353,7 @@ impl App {
         }
         self.utc_offset_secs = crate::clock::local_offset_secs((s.taken_at_ms / 1000) as i64);
         self.snapshot = Some(s);
-        self.diagnostics_offset = self
-            .diagnostics_offset
-            .min(self.diagnostics_len().saturating_sub(1));
+        self.diagnostics_offset = self.diagnostics_offset.min(self.diagnostics_max_offset);
         self.clamp_selection(old_index);
     }
 
@@ -549,7 +536,7 @@ impl App {
             K::Char('j' | 'k' | 'g' | 'G') | K::Down | K::Up | K::PageDown | K::PageUp
                 if self.screen == Screen::Diagnostics =>
             {
-                let last = self.diagnostics_len().saturating_sub(1);
+                let last = self.diagnostics_max_offset;
                 self.diagnostics_offset = match key.code {
                     K::Char('j') | K::Down => self.diagnostics_offset.saturating_add(1),
                     K::Char('k') | K::Up => self.diagnostics_offset.saturating_sub(1),

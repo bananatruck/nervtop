@@ -241,7 +241,7 @@ pub fn run(collector: Collector, mut app: App) -> io::Result<()> {
 }
 fn draw(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> io::Result<()> {
     terminal.draw(|frame| {
-        app.set_page_size(usize::from(frame.area().height.saturating_sub(8).max(1)));
+        crate::ui::prepare_frame(app, frame.area());
         crate::ui::draw(frame, app);
     })?;
     Ok(())

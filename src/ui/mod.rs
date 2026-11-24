@@ -27,6 +27,18 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 
+/// Updates navigation bounds for the frame about to be drawn.
+pub fn prepare_frame(app: &mut App, area: Rect) {
+    app.set_page_size(usize::from(area.height.saturating_sub(8).max(1)));
+    let last = if layout::is_too_small(area) {
+        0
+    } else {
+        let shell = layout::split_shell(area, app.worst_level() == Level::Critical);
+        diagnostics::max_offset(shell.body, app)
+    };
+    app.set_diagnostics_max_offset(last);
+}
+
 /// Draws the whole screen for `app`.
 pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();

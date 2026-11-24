@@ -77,7 +77,7 @@ Each sample returns `Reading::Available(value)` or `Reading::Unavailable(reason)
 
 | Metric | Primary source | Fallback or unavailable rule |
 | --- | --- | --- |
-| CPU per core and total | `sysinfo` CPU usage | Two populated readings at least sysinfo's minimum interval apart are required; earlier calls are unavailable ("warming up") |
+| CPU per core and total | `/proc/stat` counter deltas | Two valid readings at least sysinfo's minimum interval apart are required; failed reads or a changed core inventory restart warm-up |
 | Load average | `sysinfo::System::load_average` | Unavailable if `/proc/loadavg` cannot be read; CPU usage remains independent |
 | CPU frequency | `sysinfo` per-core frequency | Hidden when every core reports 0 MHz |
 | Memory and swap | `/proc/meminfo`, read afresh each sample | Read or parse failures are unavailable; swap shows "none configured" when total swap is 0 |

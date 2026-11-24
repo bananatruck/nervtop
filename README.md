@@ -21,7 +21,7 @@ It ships no logos, artwork, fonts, audio or dialogue from any show.
 Download the static Linux x86_64 binary from the latest release and run it:
 
 ```sh
-mkdir -p ~/.local/bin && curl -sL https://github.com/bananatruck/nervtop/releases/download/v0.1.2/nervtop-v0.1.2-x86_64-unknown-linux-musl.tar.gz | tar xz -C ~/.local/bin --strip-components=1 nervtop-v0.1.2-x86_64-unknown-linux-musl/nervtop
+mkdir -p ~/.local/bin && curl -sL https://github.com/bananatruck/nervtop/releases/download/v0.1.3/nervtop-v0.1.3-x86_64-unknown-linux-musl.tar.gz | tar xz -C ~/.local/bin --strip-components=1 nervtop-v0.1.3-x86_64-unknown-linux-musl/nervtop
 ~/.local/bin/nervtop
 ```
 
@@ -34,7 +34,7 @@ Each release also carries a `.sha256` file for the archive.
 Rust 1.95 or newer is required.
 
 ```sh
-cargo install --locked --git https://github.com/bananatruck/nervtop --tag v0.1.2
+cargo install --locked --git https://github.com/bananatruck/nervtop --tag v0.1.3
 ```
 
 ### Arch Linux
@@ -237,7 +237,7 @@ Polling nvidia-smi on a schedule would keep the GPU awake and cost battery.
 
 ## Resource use
 
-Measured with `scripts/measure-idle.sh` on the machine nervtop was built for: an ASUS laptop with an AMD Ryzen 9 8945HS (16 logical cores), an RTX 4060 laptop GPU and about 560 to 580 processes running, with a release build left untouched in a 160x48 tmux terminal for 60 seconds.
+Historical measurements for v0.1.1 and v0.1.2, taken with `scripts/measure-idle.sh` on the machine nervtop was built for: an ASUS laptop with an AMD Ryzen 9 8945HS (16 logical cores), an RTX 4060 laptop GPU and about 560 to 580 processes running, with a release build left untouched in a 160x48 tmux terminal for 60 seconds.
 The cost depends heavily on how fast the CPU is clocked, so the table names the power profile.
 
 | Build | Power profile | Interval | Average CPU | Resident memory |
@@ -247,9 +247,10 @@ The cost depends heavily on how fast the CPU is clocked, so the table names the 
 | v0.1.2 | power-saver, on battery | 1000 ms (default) | 5.63% of one core | 6.2 MiB |
 | v0.1.2 | power-saver, on battery | 2000 ms | 2.92% of one core | 6.2 MiB |
 
-The two releases cost the same: in the same minute in power-saver mode, the v0.1.1 binary measured 5.67% and v0.1.2 measured 5.63% of one core at 1000 ms.
+In the historical comparison, during the same minute in power-saver mode, the v0.1.1 binary measured 5.67% and v0.1.2 measured 5.63% of one core at 1000 ms.
 On a 16-thread machine, even the power-saver figure is about 0.35% of the whole CPU.
-Most of the cost is reading `/proc` for every process (about 16 ms per sample) and the hwmon sensors (about 10 ms, mostly the Wi-Fi chip and the ASUS embedded controller's fan readings); drawing a 160x48 frame takes under half a millisecond.
+In the profiling documented for v0.1.0, most of the cost was reading `/proc` for every process (about 16 ms per sample) and the hwmon sensors (about 10 ms, mostly the Wi-Fi chip and the ASUS embedded controller's fan readings); drawing a 160x48 frame took under half a millisecond.
+These measurements have not been repeated for v0.1.3.
 Your figure depends on the number of processes and on how slow your sensors are to read; run the script to measure it on your machine.
 
 ## How it works
@@ -283,7 +284,7 @@ cargo clippy --all-targets --locked -- -D warnings
 cargo fmt --check
 ```
 
-The suite has 209 tests (and 2 ignored ones that need the live machine or a real terminal: run them with `cargo test -- --ignored`).
+The suite has 295 passing tests (and 2 ignored ones that need the live machine or a real terminal: run them with `cargo test -- --ignored`).
 Parsers are tested against captured sysfs and procfs text, including the battery values of a real ASUS laptop, and every sysfs reader takes a root directory so tests run on temporary trees.
 Render tests draw the real UI into ratatui's `TestBackend` at 80x24, 120x40 and 200x60 and assert on the drawn buffer.
 Integration tests run the built binary.
@@ -310,9 +311,22 @@ scripts/measure-idle.sh target/release/nervtop 60
 
 ## Status
 
-Version 0.1.2 is complete for its scope: every panel, screen, key, config option and alert rule described here works and is tested.
+Version 0.1.3 is complete for its scope: every panel, screen, key, config option and alert rule described here works and is tested.
+
+Changes since v0.1.2:
+
+- CPU usage reads fresh counters and requires a valid baseline old enough for a rate; failed reads restart warm-up, and load-average availability is independent.
+- Memory and swap read fresh values each sample and report read or parse failures as unavailable.
+- Network rates follow interface identity across renames and replacements, reject unreadable counters, and keep availability separate for each direction's totals and rates.
+  Interface names retain their raw identity and are escaped for display.
+- Process owners refresh periodically, failed scans restart warm-up, and the selected process survives an unavailable scan.
+  Navigation reuses one sorted process list per action.
+- GPU queries bound output reads and preserve device identity across cache hits.
+- Disk alerts track kernel devices rather than mount labels.
+- Diagnostics tables scroll with the navigation keys and clamp to the rows that fit after resizing or inventory changes.
 
 Known limits:
+
 - Linux only, because it reads `/proc` and `/sys` directly.
 - Intel GPUs are listed by name but their utilisation, memory, temperature and power are shown as unavailable; there is no unprivileged sysfs interface for them that nervtop reads yet.
 - One battery is shown; a second battery is ignored.

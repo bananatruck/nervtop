@@ -318,6 +318,8 @@ Known limits:
 - One battery is shown; a second battery is ignored.
 - nervtop observes and never acts: it has no kill, signal or renice keys, by design.
 
+nervtop was built by AI coding agents directed by Kesh and reviewed by independent automated reviewers.
+
 ## License
 
 MIT, see [LICENSE](LICENSE).

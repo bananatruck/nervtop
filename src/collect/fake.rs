@@ -63,7 +63,7 @@ pub fn sample_snapshot() -> Snapshot {
         cpu: A(CpuStats {
             per_core: vec![24.0; 16],
             total: 24.0,
-            load_avg: [1.2, 1.4, 1.1],
+            load_avg: Reading::Available([1.2, 1.4, 1.1]),
             freq_mhz: Some(3200),
             brand: Some("Test 16-core CPU".into()),
         }),
@@ -94,8 +94,8 @@ pub fn sample_snapshot() -> Snapshot {
                 name: name.into(),
                 rx_bps: A(125000.0),
                 tx_bps: A(15000.0),
-                rx_total_bytes: 123456789,
-                tx_total_bytes: 23456789,
+                rx_total_bytes: Reading::Available(123456789),
+                tx_total_bytes: Reading::Available(23456789),
             })
             .collect()),
         processes: A([

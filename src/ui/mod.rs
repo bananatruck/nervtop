@@ -27,6 +27,18 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 
+/// Updates navigation bounds for the frame about to be drawn.
+pub fn prepare_frame(app: &mut App, area: Rect) {
+    app.set_page_size(usize::from(area.height.saturating_sub(8).max(1)));
+    let last = if layout::is_too_small(area) {
+        0
+    } else {
+        let shell = layout::split_shell(area, app.worst_level() == Level::Critical);
+        diagnostics::max_offset(shell.body, app)
+    };
+    app.set_diagnostics_max_offset(last);
+}
+
 /// Draws the whole screen for `app`.
 pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
@@ -663,22 +675,22 @@ mod tests {
                 name: "br-7237d48b080b".into(),
                 rx_bps: Reading::Available(0.0),
                 tx_bps: Reading::Available(0.0),
-                rx_total_bytes: 230 * 1024,
-                tx_total_bytes: 260 * 1024,
+                rx_total_bytes: Reading::Available(230 * 1024),
+                tx_total_bytes: Reading::Available(260 * 1024),
             },
             NetInterface {
                 name: "veth5d9f83b".into(),
                 rx_bps: Reading::unavailable("warming up"),
                 tx_bps: Reading::unavailable("warming up"),
-                rx_total_bytes: 126,
-                tx_total_bytes: 50 * 1024,
+                rx_total_bytes: Reading::Available(126),
+                tx_total_bytes: Reading::Available(50 * 1024),
             },
             NetInterface {
                 name: "wlan0".into(),
                 rx_bps: Reading::Available(0.0),
                 tx_bps: Reading::Available(0.0),
-                rx_total_bytes: 8 * 1024 * 1024 * 1024,
-                tx_total_bytes: 1024 * 1024 * 1024,
+                rx_total_bytes: Reading::Available(8 * 1024 * 1024 * 1024),
+                tx_total_bytes: Reading::Available(1024 * 1024 * 1024),
             },
         ]);
 

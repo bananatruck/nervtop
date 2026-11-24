@@ -41,7 +41,11 @@ The selection is kept on the same PID across refreshes when that process still e
 ### 3 DIAGNOSTICS
 
 Every temperature sensor and fan, every GPU field, the full battery record, every disk and interface, the alert rule table with current values and thresholds, and the alert event log with timestamps.
-This screen exists so that readings the overview leaves out for space can be inspected; it shows as many rows as the terminal fits and has no scrolling, and `--once` lists every reading.
+Use `j`, `k`, or the arrow keys to scroll the diagnostics tables together.
+Each shorter table stops at its last page.
+`PgUp` and `PgDn` move by a page, and `g` and `G` go to the first and last rows.
+The scroll position persists across redraws and screen changes.
+`--once` also lists every reading.
 
 ### Overlays and small terminals
 
@@ -62,8 +66,8 @@ Below 80 columns or 24 rows nervtop draws a single centered message that states 
 | `s` | Cycle the process sort key: CPU, memory, PID, name |
 | `r` | Reverse the sort order |
 | `/` | Start a process name filter; `Enter` keeps it, `Esc` clears it (also after it was kept) |
-| `j`, `k`, arrows | Move the process selection |
-| `PgUp`, `PgDn`, `g`, `G` | Page, top and bottom of the process list |
+| `j`, `k`, arrows | Move the process selection or scroll diagnostics |
+| `PgUp`, `PgDn`, `g`, `G` | Page, top and bottom of processes or diagnostics |
 | `a` | Acknowledge current alerts, which removes the banner's warning stripes until a rule rises to a higher level |
 
 ## Data sources and fallbacks
@@ -73,13 +77,13 @@ Each sample returns `Reading::Available(value)` or `Reading::Unavailable(reason)
 
 | Metric | Primary source | Fallback or unavailable rule |
 | --- | --- | --- |
-| CPU per core and total | `sysinfo` CPU usage | Unavailable on the first sample until two readings exist ("warming up") |
-| Load average | `sysinfo::System::load_average` | Always available on Linux |
+| CPU per core and total | `/proc/stat` counter deltas | Two valid readings at least sysinfo's minimum interval apart are required; failed reads or a changed core inventory restart warm-up |
+| Load average | `sysinfo::System::load_average` | Unavailable if `/proc/loadavg` cannot be read; CPU usage remains independent |
 | CPU frequency | `sysinfo` per-core frequency | Hidden when every core reports 0 MHz |
-| Memory and swap | `sysinfo` memory | Swap shows "none configured" when total swap is 0 |
+| Memory and swap | `/proc/meminfo`, read afresh each sample | Read or parse failures are unavailable; swap shows "none configured" when total swap is 0 |
 | Disks | `/proc/self/mounts` filtered to `/dev` block devices that are not FUSE (`fuseblk`, `fuse.*`) and not covered by a later mount at the same path, then `statvfs(3)` for space, and `/proc/diskstats` for read and write rates | Network and FUSE mounts are never queried, so an unresponsive server cannot block sampling; a mount record that is not valid UTF-8 is skipped on its own; one entry per device (the shortest mount point); rates are unavailable until two samples exist |
-| Network | `sysinfo::Networks` byte counters | Rates unavailable until two samples exist; loopback and interfaces that have never sent or received a byte are hidden |
-| Processes | `sysinfo` processes with CPU and memory refresh only | Users resolve through `sysinfo::Users`; unknown UIDs show the number |
+| Network | `/sys/class/net/*/ifindex` and `statistics/{rx,tx}_bytes` | Interface replacement restarts warm-up; current totals and rates carry availability per direction; unreadable counters never become baselines or appear as zero or stale totals; raw interface names are escaped for display; loopback and interfaces that have never sent or received a byte are hidden |
+| Processes | `sysinfo` CPU and memory refresh without per-thread scans | A failed scan restarts warm-up; UIDs refresh for new processes and every ten samples for all processes; users resolve through `sysinfo::Users`, with unknown UIDs shown as numbers |
 | Temperatures | `/sys/class/hwmon/*/temp*_input` with labels and `crit` values | Unavailable when no readable sensor exists |
 | Fans | `/sys/class/hwmon/*/fan*_input` | Section hidden when the machine exposes no fans |
 | AMD GPU | `/sys/bus/pci/devices/<slot>/gpu_busy_percent`, `mem_info_vram_*`, and the device's hwmon `temp1_input` and `power1_average` (or `power1_input`) | Per-field unavailable when a file is missing |

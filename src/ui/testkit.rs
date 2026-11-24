@@ -61,7 +61,7 @@ pub fn nominal_app() -> App {
         cpu: Reading::Available(CpuStats {
             per_core,
             total: 30.8,
-            load_avg: [1.42, 1.18, 0.95],
+            load_avg: Reading::Available([1.42, 1.18, 0.95]),
             freq_mhz: Some(3850),
             brand: Some("AMD Ryzen 9 8945HS".into()),
         }),
@@ -96,15 +96,15 @@ pub fn nominal_app() -> App {
                 name: "wlan0".into(),
                 rx_bps: Reading::Available(2_621_440.0),
                 tx_bps: Reading::Available(393_216.0),
-                rx_total_bytes: 8 * 1024 * 1024 * 1024,
-                tx_total_bytes: 1024 * 1024 * 1024,
+                rx_total_bytes: Reading::Available(8 * 1024 * 1024 * 1024),
+                tx_total_bytes: Reading::Available(1024 * 1024 * 1024),
             },
             NetInterface {
                 name: "eth0".into(),
                 rx_bps: Reading::Available(0.0),
                 tx_bps: Reading::Available(0.0),
-                rx_total_bytes: 64 * 1024 * 1024,
-                tx_total_bytes: 32 * 1024 * 1024,
+                rx_total_bytes: Reading::Available(64 * 1024 * 1024),
+                tx_total_bytes: Reading::Available(32 * 1024 * 1024),
             },
         ]),
         processes: Reading::Available(vec![

@@ -50,6 +50,14 @@ pub fn bytes(b: u64) -> String {
     }
 }
 
+/// Formats a current byte count or its unavailability reason.
+pub fn reading_bytes(reading: &Reading<u64>, max_width: usize) -> String {
+    match reading {
+        Reading::Available(value) => bytes(*value),
+        Reading::Unavailable(reason) => unavailable_str(reason, max_width),
+    }
+}
+
 /// Formats `used / total` in binary units.
 pub fn bytes_pair(used: u64, total: u64) -> String {
     format!("{}/{}", bytes(used), bytes(total))

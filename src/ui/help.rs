@@ -22,10 +22,13 @@ pub const HELP_BINDINGS: &[(&str, &str)] = &[
     ("s", "Cycle process sort key: CPU, memory, PID, name"),
     ("r", "Reverse the sort order"),
     ("/", "Filter processes by name (Enter keeps, Esc clears)"),
-    ("j, k, arrows", "Move the process selection"),
+    (
+        "j, k, arrows",
+        "Move process selection or scroll diagnostics",
+    ),
     (
         "PgUp, PgDn, g, G",
-        "Page, top and bottom of the process list",
+        "Page, top and bottom of processes or diagnostics",
     ),
     ("a", "Acknowledge current alerts to calm the banner"),
 ];

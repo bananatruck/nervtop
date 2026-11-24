@@ -41,7 +41,7 @@ pub fn render(app: &mut App, width: u16, height: u16) -> Buffer {
         Terminal::new(TestBackend::new(width, height)).expect("the test backend cannot fail");
     terminal
         .draw(|frame| {
-            app.set_page_size(usize::from(frame.area().height.saturating_sub(8).max(1)));
+            crate::ui::prepare_frame(app, frame.area());
             crate::ui::draw(frame, app);
         })
         .expect("the test backend cannot fail");

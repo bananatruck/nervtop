@@ -198,15 +198,38 @@ pub fn rate(previous: Option<u64>, current: u64, elapsed_secs: f64) -> Reading<f
 }
 
 #[derive(Default)]
-struct Rates {
-    previous: std::collections::BTreeMap<String, (u64, u64)>,
+struct RateBaseline {
+    previous: Option<(u64, std::time::Instant)>,
+}
+
+impl RateBaseline {
+    fn sample(&mut self, current: Option<u64>, now: std::time::Instant) -> Reading<f64> {
+        let Some(current) = current else {
+            return Reading::unavailable("counter not readable");
+        };
+        let reading = match self.previous {
+            Some((previous, at)) => rate(
+                Some(previous),
+                current,
+                now.duration_since(at).as_secs_f64(),
+            ),
+            None => rate(None, current, 0.0),
+        };
+        self.previous = Some((current, now));
+        reading
+    }
+}
+
+#[derive(Default)]
+struct Rates<K = String> {
+    previous: std::collections::BTreeMap<K, (u64, u64)>,
     at: Option<std::time::Instant>,
 }
-impl Rates {
+impl<K: Ord + Clone> Rates<K> {
     fn sample(
         &mut self,
-        counters: std::collections::BTreeMap<String, (u64, u64)>,
-    ) -> std::collections::BTreeMap<String, (Reading<f64>, Reading<f64>)> {
+        counters: std::collections::BTreeMap<K, (u64, u64)>,
+    ) -> std::collections::BTreeMap<K, (Reading<f64>, Reading<f64>)> {
         let now = std::time::Instant::now();
         let elapsed = self
             .at

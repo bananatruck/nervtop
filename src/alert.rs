@@ -270,11 +270,11 @@ impl AlertEngine {
             if !cfg.enabled {
                 continue;
             }
-            for (subject, value, note, nominal) in inputs(snapshot, rule) {
-                // Disks are judged per mount. Every other rule judges one
+            for (subject, value, note, nominal, identity) in inputs(snapshot, rule) {
+                // Disks are judged per device. Every other rule judges one
                 // value (for temperatures, the hottest sensor), so its state
                 // must survive the hottest sensor changing name.
-                let key = (rule, state_subject(rule, &subject));
+                let key = (rule, identity);
                 let mut state = self.states.remove(&key).unwrap_or(RuleState {
                     level: Level::Unknown,
                     warn_samples: 0,
@@ -403,14 +403,6 @@ impl RuleState {
     }
 }
 
-fn state_subject(rule: RuleId, subject: &str) -> String {
-    if rule == RuleId::Disk {
-        subject.to_owned()
-    } else {
-        String::new()
-    }
-}
-
 /// "CPU TEMP k10temp Tctl 89.3°C": label, subject when there is one, value.
 fn describe(r: &RuleStatus) -> String {
     let mut parts = vec![r.rule.label().to_owned()];
@@ -440,7 +432,10 @@ pub fn format_rule_value(rule: RuleId, v: f64) -> String {
     }
 }
 
-type Input = (String, Option<f64>, Option<String>, bool);
+/// Subject shown to the user, value, note, nominal, and the identity the
+/// alert state is kept under (the kernel device for disks, so two mounts whose
+/// displayed labels collide keep separate state; empty for single-value rules).
+type Input = (String, Option<f64>, Option<String>, bool, String);
 fn inputs(s: &Snapshot, rule: RuleId) -> Vec<Input> {
     let single = |value: Option<f64>, reason: Option<&str>| {
         vec![(
@@ -450,17 +445,19 @@ fn inputs(s: &Snapshot, rule: RuleId) -> Vec<Input> {
                 .is_none()
                 .then(|| reason.unwrap_or("not reported").to_string()),
             false,
+            String::new(),
         )]
     };
     match rule {
         RuleId::CpuUsage => single(s.cpu.value().map(|c| c.total as f64), s.cpu.reason()),
-        RuleId::Load => single(
-            s.cpu
-                .value()
-                .filter(|c| !c.per_core.is_empty())
-                .map(|c| c.load_avg[0] / c.per_core.len() as f64),
-            s.cpu.reason().or(Some("no cpu cores")),
-        ),
+        RuleId::Load => match &s.cpu {
+            crate::model::Reading::Unavailable(r) => single(None, Some(r)),
+            crate::model::Reading::Available(c) => match (&c.load_avg, c.per_core.len()) {
+                (crate::model::Reading::Unavailable(r), _) => single(None, Some(r)),
+                (_, 0) => single(None, Some("no cpu cores")),
+                (crate::model::Reading::Available(l), n) => single(Some(l[0] / n as f64), None),
+            },
+        },
         RuleId::Memory => single(
             s.memory.value().and_then(|m| m.used_percent()),
             s.memory.reason().or(Some("zero memory total")),
@@ -485,6 +482,7 @@ fn inputs(s: &Snapshot, rule: RuleId) -> Vec<Input> {
                             d.used_percent(),
                             (d.total_bytes == 0).then(|| "zero disk total".into()),
                             false,
+                            d.device.clone(),
                         )
                     })
                     .collect();
@@ -509,7 +507,13 @@ fn inputs(s: &Snapshot, rule: RuleId) -> Vec<Input> {
                         None => return single(None, Some("battery status unknown")),
                     },
                 };
-                vec![(String::new(), Some(b.percent), None, !discharging)]
+                vec![(
+                    String::new(),
+                    Some(b.percent),
+                    None,
+                    !discharging,
+                    String::new(),
+                )]
             }
         },
         RuleId::CpuTemp | RuleId::StorageTemp | RuleId::GpuTemp => {
@@ -547,7 +551,7 @@ fn inputs(s: &Snapshot, rule: RuleId) -> Vec<Input> {
                 .into_iter()
                 .max_by(|a, b| a.1.total_cmp(&b.1).then_with(|| b.0.cmp(&a.0)))
             {
-                Some((subject, value)) => vec![(subject, Some(value), None, false)],
+                Some((subject, value)) => vec![(subject, Some(value), None, false, String::new())],
                 None => single(None, Some(reason)),
             }
         }
@@ -583,6 +587,56 @@ mod tests {
             .iter()
             .find(|r| r.rule == RuleId::CpuTemp)
             .expect("cpu_temp evaluated")
+    }
+
+    #[test]
+    fn unavailable_load_average_leaves_cpu_usage_judged() {
+        let mut snap = crate::collect::fake::sample_snapshot();
+        if let crate::model::Reading::Available(c) = &mut snap.cpu {
+            c.load_avg = crate::model::Reading::unavailable("loadavg not readable");
+        }
+        let eval = AlertEngine::default().evaluate(&snap, &crate::config::AlertConfig::default());
+        let usage = eval
+            .rules
+            .iter()
+            .find(|r| r.rule == RuleId::CpuUsage)
+            .unwrap();
+        let load = eval.rules.iter().find(|r| r.rule == RuleId::Load).unwrap();
+        assert!(usage.value.is_some());
+        assert_eq!(load.level, Level::Unknown);
+        assert_eq!(load.note.as_deref(), Some("loadavg not readable"));
+    }
+
+    #[test]
+    fn disks_whose_labels_collide_keep_separate_alert_state() {
+        use crate::model::*;
+        let disk = |device: &str, available: u64| DiskStats {
+            mount_point: "/mnt/x?".into(),
+            device: device.into(),
+            file_system: "ext4".into(),
+            total_bytes: 100,
+            available_bytes: available,
+            read_bps: Reading::Available(0.0),
+            write_bps: Reading::Available(0.0),
+        };
+        let mut snap = crate::collect::fake::sample_snapshot();
+        snap.disks = Reading::Available(vec![disk("sdb1", 1), disk("sdc1", 50)]);
+        let config = crate::config::AlertConfig::default();
+        let mut engine = AlertEngine::default();
+        let mut eval = None;
+        for seq in 1..=3 {
+            snap.seq = seq;
+            eval = Some(engine.evaluate(&snap, &config));
+        }
+        let levels: Vec<Level> = eval
+            .unwrap()
+            .rules
+            .iter()
+            .filter(|r| r.rule == RuleId::Disk)
+            .map(|r| r.level)
+            .collect();
+        assert!(levels.contains(&Level::Critical), "{levels:?}");
+        assert!(levels.contains(&Level::Nominal), "{levels:?}");
     }
 
     #[test]

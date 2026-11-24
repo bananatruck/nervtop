@@ -578,14 +578,27 @@ mod tests {
     fn pipe() -> (std::fs::File, std::fs::File) {
         use std::os::fd::FromRawFd;
         let mut fds = [0; 2];
-        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
-        // SAFETY: pipe(2) just returned these two new descriptors.
+        assert_eq!(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
+        // SAFETY: pipe2(2) just returned these two new descriptors.
         unsafe {
             (
                 std::fs::File::from_raw_fd(fds[0]),
                 std::fs::File::from_raw_fd(fds[1]),
             )
         }
+    }
+
+    #[test]
+    fn fixture_pipe_reaches_eof_while_an_unrelated_child_is_running() {
+        use std::io::Write;
+        let (reader, mut writer) = pipe();
+        writer.write_all(b"row\n").unwrap();
+        let mut child = Command::new("sleep").arg("3").spawn().unwrap();
+        drop(writer);
+        let result = read_bounded(reader, Instant::now() + Duration::from_millis(200), 4);
+        let _ = child.kill();
+        child.wait().unwrap();
+        assert_eq!(result, Ok("row\n".to_owned()));
     }
 
     #[test]

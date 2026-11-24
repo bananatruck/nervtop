@@ -94,8 +94,8 @@ pub fn sample_snapshot() -> Snapshot {
                 name: name.into(),
                 rx_bps: A(125000.0),
                 tx_bps: A(15000.0),
-                rx_total_bytes: 123456789,
-                tx_total_bytes: 23456789,
+                rx_total_bytes: Reading::Available(123456789),
+                tx_total_bytes: Reading::Available(23456789),
             })
             .collect()),
         processes: A([

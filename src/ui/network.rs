@@ -12,7 +12,7 @@ use ratatui::widgets::{Paragraph, Sparkline};
 
 /// Returns network interfaces ordered busiest first:
 /// by current `rx+tx` rate descending (unavailable rates count as `0`),
-/// then lifetime `rx+tx` total descending, then name ascending.
+/// then available lifetime `rx+tx` totals descending, then name ascending.
 pub fn sorted_interfaces(ifaces: &[NetInterface]) -> Vec<&NetInterface> {
     fn clean_rate(r: &Reading<f64>) -> f64 {
         match r {
@@ -24,8 +24,10 @@ pub fn sorted_interfaces(ifaces: &[NetInterface]) -> Vec<&NetInterface> {
     sorted.sort_by(|a, b| {
         let rate_a = clean_rate(&a.rx_bps) + clean_rate(&a.tx_bps);
         let rate_b = clean_rate(&b.rx_bps) + clean_rate(&b.tx_bps);
-        let total_a = u128::from(a.rx_total_bytes) + u128::from(a.tx_total_bytes);
-        let total_b = u128::from(b.rx_total_bytes) + u128::from(b.tx_total_bytes);
+        let total_a = u128::from(a.rx_total_bytes.value().copied().unwrap_or(0))
+            + u128::from(a.tx_total_bytes.value().copied().unwrap_or(0));
+        let total_b = u128::from(b.rx_total_bytes.value().copied().unwrap_or(0))
+            + u128::from(b.tx_total_bytes.value().copied().unwrap_or(0));
         rate_b
             .total_cmp(&rate_a)
             .then_with(|| total_b.cmp(&total_a))
@@ -107,8 +109,8 @@ pub fn draw_network(frame: &mut Frame, area: Rect, app: &App) {
             spans.push(Span::styled(
                 format!(
                     "  ({} / {})",
-                    fmt::bytes(iface.rx_total_bytes),
-                    fmt::bytes(iface.tx_total_bytes)
+                    fmt::reading_bytes(&iface.rx_total_bytes, 11),
+                    fmt::reading_bytes(&iface.tx_total_bytes, 11)
                 ),
                 muted,
             ));

@@ -593,8 +593,8 @@ fn draw_io_table(frame: &mut Frame, area: Rect, app: &App) {
                         n.name.clone(),
                         format!(
                             "{}/{}",
-                            fmt::bytes(n.rx_total_bytes),
-                            fmt::bytes(n.tx_total_bytes)
+                            fmt::reading_bytes(&n.rx_total_bytes, 11),
+                            fmt::reading_bytes(&n.tx_total_bytes, 11)
                         ),
                         rx_tx_s,
                     ],

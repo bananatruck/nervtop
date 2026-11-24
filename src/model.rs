@@ -154,8 +154,9 @@ pub struct NetInterface {
     pub name: String,
     pub rx_bps: Reading<f64>,
     pub tx_bps: Reading<f64>,
-    pub rx_total_bytes: u64,
-    pub tx_total_bytes: u64,
+    /// Current counters, independent of the availability of rate baselines.
+    pub rx_total_bytes: Reading<u64>,
+    pub tx_total_bytes: Reading<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]

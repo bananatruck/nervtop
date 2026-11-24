@@ -218,10 +218,6 @@ impl RateBaseline {
         self.previous = Some((current, now));
         reading
     }
-
-    fn latest(&self) -> Option<u64> {
-        self.previous.map(|(value, _)| value)
-    }
 }
 
 #[derive(Default)]

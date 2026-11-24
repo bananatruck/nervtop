@@ -205,8 +205,8 @@ pub fn text(s: &Snapshot, eval: &Evaluation) -> String {
                         "down {}, up {}, total down {}, total up {}",
                         reading(&n.rx_bps, |v| fmt_rate(*v)),
                         reading(&n.tx_bps, |v| fmt_rate(*v)),
-                        fmt_bytes(n.rx_total_bytes),
-                        fmt_bytes(n.tx_total_bytes)
+                        reading(&n.rx_total_bytes, |v| fmt_bytes(*v)),
+                        reading(&n.tx_total_bytes, |v| fmt_bytes(*v))
                     ),
                 );
             }

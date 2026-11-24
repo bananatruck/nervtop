@@ -663,22 +663,22 @@ mod tests {
                 name: "br-7237d48b080b".into(),
                 rx_bps: Reading::Available(0.0),
                 tx_bps: Reading::Available(0.0),
-                rx_total_bytes: 230 * 1024,
-                tx_total_bytes: 260 * 1024,
+                rx_total_bytes: Reading::Available(230 * 1024),
+                tx_total_bytes: Reading::Available(260 * 1024),
             },
             NetInterface {
                 name: "veth5d9f83b".into(),
                 rx_bps: Reading::unavailable("warming up"),
                 tx_bps: Reading::unavailable("warming up"),
-                rx_total_bytes: 126,
-                tx_total_bytes: 50 * 1024,
+                rx_total_bytes: Reading::Available(126),
+                tx_total_bytes: Reading::Available(50 * 1024),
             },
             NetInterface {
                 name: "wlan0".into(),
                 rx_bps: Reading::Available(0.0),
                 tx_bps: Reading::Available(0.0),
-                rx_total_bytes: 8 * 1024 * 1024 * 1024,
-                tx_total_bytes: 1024 * 1024 * 1024,
+                rx_total_bytes: Reading::Available(8 * 1024 * 1024 * 1024),
+                tx_total_bytes: Reading::Available(1024 * 1024 * 1024),
             },
         ]);
 

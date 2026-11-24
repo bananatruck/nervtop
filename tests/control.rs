@@ -836,8 +836,8 @@ fn history_available_only() {
         name: "eth0".into(),
         rx_bps: Reading::Available(5.),
         tx_bps: Reading::unavailable("warm"),
-        rx_total_bytes: 0,
-        tx_total_bytes: 0,
+        rx_total_bytes: Reading::Available(0),
+        tx_total_bytes: Reading::Available(0),
     }]);
     a.apply_snapshot(s);
     assert_eq!(a.history.cpu_total.len(), 1);
@@ -947,6 +947,49 @@ fn report_json_missing_no_number() {
     assert!(v["snapshot"]["network"]["value"].as_f64().is_none());
     assert_eq!(v["snapshot"]["cpu"]["value"]["total"], 10.);
 }
+
+#[test]
+fn unreadable_network_totals_stay_unavailable_in_reports_and_tables() {
+    let mut s = snapshot();
+    s.network = Reading::Available(vec![NetInterface {
+        name: "eth0".into(),
+        rx_bps: Reading::unavailable("counter not readable"),
+        tx_bps: Reading::Available(5.0),
+        rx_total_bytes: Reading::unavailable("counter not readable"),
+        tx_total_bytes: Reading::Available(321),
+    }]);
+    let e = AlertEngine::default().evaluate(&s, &instant());
+    let text = report::text(&s, &e);
+    assert!(
+        text.contains("total down unavailable (counter not readable), total up 321 B"),
+        "{text}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&report::json(&s, &e)).unwrap();
+    let interface = &json["snapshot"]["network"]["value"][0];
+    assert_eq!(interface["rx_total_bytes"]["status"], "unavailable");
+    assert_eq!(interface["tx_total_bytes"]["value"], 321);
+
+    let mut a = app();
+    a.apply_snapshot(s);
+    for screen in [Screen::Overview, Screen::Diagnostics] {
+        a.screen = screen;
+        let buffer = nervtop::screenshot::render(&mut a, 240, 60);
+        let row: String = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .find(|line| line.contains("eth0"))
+            .expect("network interface is visible");
+        assert!(
+            row.contains("unavailable/321 B") || row.contains("unavailable / 321 B"),
+            "{row}"
+        );
+        assert!(!row.contains("0 B"), "{row}");
+    }
+}
+
 fn gpu(slot: &str, power_state: GpuPower, temp: f64) -> GpuStats {
     GpuStats {
         pci_slot: slot.into(),
@@ -1139,8 +1182,8 @@ fn iface(name: &str, rx: Reading<f64>) -> NetInterface {
         name: name.into(),
         rx_bps: rx,
         tx_bps: Reading::Available(1.),
-        rx_total_bytes: 10,
-        tx_total_bytes: 10,
+        rx_total_bytes: Reading::Available(10),
+        tx_total_bytes: Reading::Available(10),
     }
 }
 #[test]

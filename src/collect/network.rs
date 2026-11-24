@@ -87,8 +87,14 @@ impl Source for Network {
                 name: display_name(&name),
                 rx_bps,
                 tx_bps,
-                rx_total_bytes: rx_baseline.latest().unwrap_or(0),
-                tx_total_bytes: tx_baseline.latest().unwrap_or(0),
+                rx_total_bytes: rx.map_or_else(
+                    || Reading::unavailable("counter not readable"),
+                    Reading::Available,
+                ),
+                tx_total_bytes: tx.map_or_else(
+                    || Reading::unavailable("counter not readable"),
+                    Reading::Available,
+                ),
             });
         }
         self.rates.retain(|key, _| seen.contains(key));
@@ -184,6 +190,14 @@ mod tests {
         let unreadable = &unreadable_sample.value().unwrap()[0];
         assert_eq!(unreadable.rx_bps.reason(), Some("counter not readable"));
         assert_eq!(unreadable.tx_bps.reason(), Some("warming up"));
+        assert_eq!(
+            serde_json::to_value(unreadable).unwrap()["rx_total_bytes"],
+            serde_json::json!({"status": "unavailable", "value": "counter not readable"})
+        );
+        assert_eq!(
+            serde_json::to_value(unreadable).unwrap()["tx_total_bytes"],
+            serde_json::json!({"status": "available", "value": 100})
+        );
 
         write_interface(root.path(), "eth0", 7, 10, 110);
         let first_valid_sample = network.sample();
@@ -205,6 +219,14 @@ mod tests {
         let failed = &failed_sample.value().unwrap()[0];
         assert_eq!(failed.rx_bps.reason(), Some("counter not readable"));
         assert!(failed.tx_bps.is_available());
+        assert_eq!(
+            serde_json::to_value(failed).unwrap()["rx_total_bytes"],
+            serde_json::json!({"status": "unavailable", "value": "counter not readable"})
+        );
+        assert_eq!(
+            serde_json::to_value(failed).unwrap()["tx_total_bytes"],
+            serde_json::json!({"status": "available", "value": 130})
+        );
 
         write_interface(root.path(), "eth0", 7, 40, 140);
         let recovered_sample = network.sample();

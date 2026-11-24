@@ -69,6 +69,12 @@ impl Source for Network {
             };
             let rx = number::<u64>(dir.join("statistics/rx_bytes"));
             let tx = number::<u64>(dir.join("statistics/tx_bytes"));
+            // A name can be reused while the counters are being read. Never
+            // attach the replacement's counters to the old device baseline.
+            if number::<u32>(dir.join("ifindex")) != Some(ifindex) {
+                self.rates.remove(&(ifindex, name));
+                continue;
+            }
             if rx == Some(0) && tx == Some(0) {
                 continue;
             }
@@ -129,6 +135,41 @@ mod tests {
         let replacement = replacement_sample.value().unwrap();
         assert_eq!(replacement[0].rx_bps.reason(), Some("warming up"));
         assert_eq!(replacement[0].tx_bps.reason(), Some("warming up"));
+    }
+
+    #[test]
+    fn identity_changes_during_counter_reads_discard_the_observation() {
+        use std::io::Write;
+        use std::os::unix::ffi::OsStrExt;
+
+        let root = tempfile::tempdir().unwrap();
+        write_interface(root.path(), "eth0", 7, 100, 200);
+        let mut network = Network::new(root.path().into());
+        assert!(network.sample().is_available());
+        let dir = root.path().join("sys/class/net/eth0");
+        let rx_path = dir.join("statistics/rx_bytes");
+        fs::remove_file(&rx_path).unwrap();
+        let path = std::ffi::CString::new(rx_path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: path is a NUL-terminated filename in the temporary fixture.
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+        let replacement = std::thread::spawn(move || {
+            // Opening the writer waits until the collector has read ifindex
+            // and opened the counter, making the replacement deterministic.
+            let mut writer = fs::OpenOptions::new().write(true).open(rx_path).unwrap();
+            fs::write(dir.join("ifindex"), "8").unwrap();
+            fs::write(dir.join("statistics/tx_bytes"), "2200").unwrap();
+            writer.write_all(b"1100").unwrap();
+        });
+        let sample = network.sample();
+        replacement.join().unwrap();
+        assert!(sample.value().unwrap().is_empty());
+
+        fs::remove_file(root.path().join("sys/class/net/eth0/statistics/rx_bytes")).unwrap();
+        write_interface(root.path(), "eth0", 8, 1200, 2400);
+        let recovered = network.sample();
+        let interface = &recovered.value().unwrap()[0];
+        assert_eq!(interface.rx_bps.reason(), Some("warming up"));
+        assert_eq!(interface.tx_bps.reason(), Some("warming up"));
     }
 
     #[test]

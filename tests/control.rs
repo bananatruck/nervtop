@@ -961,7 +961,7 @@ fn unreadable_network_totals_stay_unavailable_in_reports_and_tables() {
     let e = AlertEngine::default().evaluate(&s, &instant());
     let text = report::text(&s, &e);
     assert!(
-        text.contains("total down unavailable (counter not readable), total up 321 B"),
+        text.contains("total down unavailable (counter not readable), total up 321.0 B"),
         "{text}"
     );
     let json: serde_json::Value = serde_json::from_str(&report::json(&s, &e)).unwrap();

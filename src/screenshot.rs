@@ -73,10 +73,13 @@ pub fn write_file(path: &std::path::Path, contents: &str) -> std::io::Result<()>
         nanos
     ));
     // create_new fails if the name exists, and only a file this call created
-    // is ever removed.
+    // is ever removed. Owner-only from creation: a screenshot can show host,
+    // user and process names, and the rename keeps this file's mode.
+    use std::os::unix::fs::OpenOptionsExt;
     let mut f = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
+        .mode(0o600)
         .open(&tmp)?;
     let result = f
         .write_all(contents.as_bytes())
@@ -110,6 +113,17 @@ mod tests {
         write_file(&path, "<svg/>").unwrap();
         assert_eq!(std::fs::read_to_string(&old).unwrap(), "someone else's");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "<svg/>");
+    }
+    /// A screenshot can show host, user and process names, so only its
+    /// owner may read it, while it is written and after the rename.
+    #[test]
+    fn screenshots_are_readable_by_their_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("shot.svg");
+        write_file(&path, "<svg/>").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "{mode:o}");
     }
     #[test]
     fn write_replaces_a_symlink_instead_of_following_it() {

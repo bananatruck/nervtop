@@ -165,13 +165,31 @@ pub struct ProcessInfo {
     pub name: String,
     /// User name, or the numeric UID when it cannot be resolved.
     pub user: String,
-    /// CPU usage in percent of one core, so it can exceed 100 on multicore machines.
-    pub cpu_percent: f32,
+    /// CPU usage in percent of one core, so it can exceed 100 on multicore
+    /// machines; unavailable ("warming up") on a process's first scan, before
+    /// its CPU time has a baseline.
+    pub cpu_percent: Reading<f32>,
     pub memory_bytes: u64,
     /// Short state, for example "run", "sleep", "idle", "zombie".
     pub state: String,
     /// True for kernel threads, which have no command line.
     pub kernel_thread: bool,
+}
+
+impl ProcessInfo {
+    /// Orders processes by CPU usage, `descending` or not, with every process
+    /// whose CPU is not measured yet after all measured ones in either
+    /// direction, so it never ranks as idle or as busy.
+    pub fn cmp_cpu(&self, other: &Self, descending: bool) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        match (self.cpu_percent.value(), other.cpu_percent.value()) {
+            (Some(a), Some(b)) if descending => b.total_cmp(a),
+            (Some(a), Some(b)) => a.total_cmp(b),
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => Ordering::Equal,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -224,10 +242,14 @@ pub enum GpuVendor {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GpuPower {
-    /// The device is powered and its fields were queried.
+    /// The device's runtime status was read and is not suspended. Each field
+    /// carries its own availability, including why it was not queried (a
+    /// `resuming` or `error` status, or another adapter that is asleep).
     Active,
     /// The device is runtime-suspended; fields were not queried so it stays asleep.
     Suspended,
+    /// The device's runtime status could not be read; fields were not queried.
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]

@@ -166,7 +166,12 @@ fn is_system_user(user: &str) -> bool {
 
 /// `lo`, `ethN`, `wlanN`, and systemd predictable names built only from
 /// bus positions (`eno1`, `ens33`, `enp0s31f6`, `wlp2s0`, `enp5s0u1`).
-/// MAC-based names (`enx001122aabbcc`) and anything else are masked.
+/// After the `en`, `wl` or `ww` prefix, such a name is a sequence of marker
+/// letters (systemd.net-naming-scheme(7): `o`, `s`, `p`, `P`, `v`, `b` first,
+/// then `f`, `n`, `d`, `u`, `c`, `i`), each followed by its number, so
+/// letters from that alphabet cannot spell a word (`ens1finn`). MAC-based
+/// names (`enx001122aabbcc`), port names after `n` that are not numbers, and
+/// anything else are masked.
 fn is_standard_interface(name: &str) -> bool {
     let digits_after = |prefix: &str| {
         name.strip_prefix(prefix)
@@ -178,10 +183,23 @@ fn is_standard_interface(name: &str) -> bool {
     let Some(rest) = ["en", "wl", "ww"].iter().find_map(|p| name.strip_prefix(p)) else {
         return false;
     };
-    let mut chars = rest.chars();
-    matches!(chars.next(), Some('o' | 's' | 'p' | 'P' | 'v' | 'b'))
-        && rest.chars().any(|c| c.is_ascii_digit())
-        && chars.all(|c| c.is_ascii_digit() || "psfdnuci".contains(c))
+    if !rest.starts_with(['o', 's', 'p', 'P', 'v', 'b']) {
+        return false;
+    }
+    let mut chars = rest.chars().peekable();
+    while let Some(marker) = chars.next() {
+        if !"ospPvbfndcui".contains(marker) {
+            return false;
+        }
+        let mut digits = 0;
+        while chars.next_if(char::is_ascii_digit).is_some() {
+            digits += 1;
+        }
+        if digits == 0 {
+            return false;
+        }
+    }
+    true
 }
 
 #[cfg(test)]
@@ -199,7 +217,7 @@ mod tests {
                 pid: 10,
                 name: "secret-tool".into(),
                 user: "kesh".into(),
-                cpu_percent: 42.0,
+                cpu_percent: Reading::Available(42.0),
                 ..template.clone()
             },
             ProcessInfo {
@@ -236,7 +254,7 @@ mod tests {
         let p = s.processes.value().unwrap();
         assert_eq!(p[0].name, "app-01");
         assert_eq!(p[0].user, "user");
-        assert_eq!(p[0].cpu_percent, 42.0);
+        assert_eq!(p[0].cpu_percent, Reading::Available(42.0));
         assert_eq!(p[1].name, "systemd");
         assert_eq!(p[1].user, "root");
         assert_eq!(p[2].name, "app-01", "same name, same label");
@@ -253,10 +271,34 @@ mod tests {
 
     #[test]
     fn identifiers_hidden_in_standard_looking_names_are_masked() {
-        for n in ["enx001122aabbcc", "enalice1", "wlbob2"] {
+        // Every marker letter must carry a number, so letters chosen from
+        // the marker alphabet cannot spell a name ("ens1finn").
+        for n in [
+            "enx001122aabbcc",
+            "enalice1",
+            "wlbob2",
+            "ens1finn",
+            "enpips1",
+            "eno1nic",
+            "ens1f",
+            "enp0s",
+            "ens01d",
+        ] {
             assert!(!is_standard_interface(n), "{n}");
         }
-        for n in ["enp0s31f6", "wlp0s20f3", "eno1", "ens33", "enp5s0u1"] {
+        for n in [
+            "enp0s31f6",
+            "wlp0s20f3",
+            "eno1",
+            "ens33",
+            "enp5s0u1",
+            "enP1p0s0",
+            "enp0s20u1c2i3",
+            "wwp0s20f0u2i12",
+            "eno1d1",
+            "env1",
+            "enb3",
+        ] {
             assert!(is_standard_interface(n), "{n}");
         }
         assert!(!is_system_user("systemd-alice"));

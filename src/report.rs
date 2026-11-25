@@ -248,6 +248,7 @@ pub fn text(s: &Snapshot, eval: &Evaluation) -> String {
                 let state = match g.power_state {
                     GpuPower::Active => "active",
                     GpuPower::Suspended => "suspended (not woken to read it)",
+                    GpuPower::Unknown => "power state unknown (not queried)",
                 };
                 field(&mut out, &g.pci_slot, format!("{}, {state}", g.name));
                 field(
@@ -320,11 +321,7 @@ pub fn text(s: &Snapshot, eval: &Evaluation) -> String {
     match &s.processes {
         Reading::Available(ps) => {
             let mut busiest: Vec<&ProcessInfo> = ps.iter().collect();
-            busiest.sort_by(|a, b| {
-                b.cpu_percent
-                    .total_cmp(&a.cpu_percent)
-                    .then(b.memory_bytes.cmp(&a.memory_bytes))
-            });
+            busiest.sort_by(|a, b| a.cmp_cpu(b, true).then(b.memory_bytes.cmp(&a.memory_bytes)));
             let _ = writeln!(
                 out,
                 "  {} processes; the {} busiest:",
@@ -342,7 +339,9 @@ pub fn text(s: &Snapshot, eval: &Evaluation) -> String {
                     "  {:>8} {:<12} {:>7} {:>11} {:<7} {}",
                     p.pid,
                     p.user,
-                    fmt_percent(p.cpu_percent as f64),
+                    p.cpu_percent
+                        .value()
+                        .map_or_else(|| "--".to_owned(), |v| fmt_percent(*v as f64)),
                     fmt_bytes(p.memory_bytes),
                     p.state,
                     p.name
@@ -456,7 +455,7 @@ mod tests {
             (0..40)
                 .map(|i| ProcessInfo {
                     pid: i,
-                    cpu_percent: i as f32,
+                    cpu_percent: Reading::Available(i as f32),
                     name: format!("proc{i}"),
                     ..template.clone()
                 })

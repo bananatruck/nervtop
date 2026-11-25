@@ -73,7 +73,13 @@ pub fn draw_processes_overview(frame: &mut Frame, area: Rect, app: &App) {
         let name_s = if is_sel { row_style } else { bold_text };
         lines.push(Line::from(vec![
             Span::styled(format!("{:>6} ", proc.pid), row_style),
-            Span::styled(format!("{:>4.1}% ", proc.cpu_percent), row_style),
+            Span::styled(
+                match proc.cpu_percent.value() {
+                    Some(v) => format!("{v:>4.1}% "),
+                    None => format!("{:>5} ", "--"),
+                },
+                row_style,
+            ),
             Span::styled(format!("{:>8} ", fmt::bytes(proc.memory_bytes)), row_style),
             Span::styled(proc.name.clone(), name_s),
         ]));
@@ -199,7 +205,11 @@ pub fn draw_processes_screen(frame: &mut Frame, area: Rect, app: &App) {
             Row::new(vec![
                 Cell::from(pr.pid.to_string()),
                 Cell::from(pr.user.clone()),
-                Cell::from(fmt::percent(pr.cpu_percent as f64)),
+                Cell::from(
+                    pr.cpu_percent
+                        .value()
+                        .map_or_else(|| "--".to_owned(), |v| fmt::percent(*v as f64)),
+                ),
                 Cell::from(fmt::bytes(pr.memory_bytes)),
                 Cell::from(pr.state.clone()),
                 Cell::from(pr.name.clone()),

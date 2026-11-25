@@ -100,7 +100,10 @@ fn collect_loop(
                 if paused {
                     paused = false;
                     // Refresh the baselines so the next rates do not average
-                    // over the whole paused gap.
+                    // over the whole paused gap; forget them first, so a
+                    // counter that fails to read now cannot keep its
+                    // pre-pause value.
+                    collector.restart();
                     collector.sample();
                     next = Instant::now() + BASELINE;
                     after_baseline = true;
@@ -296,6 +299,41 @@ mod tests {
             battery: missing(),
         })
     }
+    /// Records, in one log shared with the test, each sample and restart.
+    struct Recording(std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>);
+    impl Source for Recording {
+        type Output = Vec<NetInterface>;
+        fn sample(&mut self) -> Reading<Self::Output> {
+            self.0.lock().unwrap().push("sample");
+            Reading::unavailable("test source")
+        }
+        fn restart(&mut self) {
+            self.0.lock().unwrap().push("restart");
+        }
+    }
+
+    #[test]
+    fn resume_restarts_rate_baselines_before_its_unpublished_sample() {
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut sources = collector();
+        sources.replace_network(Box::new(Recording(log.clone())));
+        let (tx, rx) = mpsc::channel();
+        let (events, received) = mpsc::channel();
+        let worker = thread::spawn(move || collect_loop(sources, 10000, rx, events));
+        received.recv_timeout(Duration::from_secs(5)).unwrap();
+        tx.send(Control::Pause(true)).unwrap();
+        tx.send(Control::Pause(false)).unwrap();
+        received.recv_timeout(Duration::from_secs(5)).unwrap();
+        tx.send(Control::Quit).unwrap();
+        worker.join().unwrap();
+        // Start: baseline sample, published sample. Resume: restart, baseline
+        // sample, published sample. No restart anywhere else.
+        assert_eq!(
+            *log.lock().unwrap(),
+            ["sample", "sample", "restart", "sample", "sample"]
+        );
+    }
+
     #[test]
     fn collector_warms_pauses_resumes_and_changes_interval() {
         // Every collector.sample() bumps seq, so seq counts samples taken,

@@ -30,13 +30,13 @@ use ratatui::widgets::{Block, Paragraph};
 /// Updates navigation bounds for the frame about to be drawn.
 pub fn prepare_frame(app: &mut App, area: Rect) {
     app.set_page_size(usize::from(area.height.saturating_sub(8).max(1)));
-    let last = if layout::is_too_small(area) {
-        0
-    } else {
+    // A frame too small for any table has no bounds; the saved position is
+    // kept until the tables can be drawn again.
+    let bounds = (!layout::is_too_small(area)).then(|| {
         let shell = layout::split_shell(area, app.worst_level() == Level::Critical);
-        diagnostics::max_offset(shell.body, app)
-    };
-    app.set_diagnostics_max_offset(last);
+        diagnostics::bounds(shell.body, app)
+    });
+    app.set_diagnostics_bounds(bounds);
 }
 
 /// Draws the whole screen for `app`.

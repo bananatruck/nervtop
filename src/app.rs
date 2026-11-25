@@ -180,6 +180,8 @@ pub struct App {
     /// Shared row offset for diagnostics tables; each table clamps to its final page.
     pub diagnostics_offset: usize,
     diagnostics_max_offset: usize,
+    /// Rows one PgDn or PgUp moves the diagnostics tables.
+    diagnostics_page: usize,
     /// Every rule status from the latest evaluation, in `RuleId::ALL` order.
     pub rules: Vec<RuleStatus>,
     pub consensus: Consensus,
@@ -212,6 +214,7 @@ impl App {
             procs: ProcessView::default(),
             diagnostics_offset: 0,
             diagnostics_max_offset: 0,
+            diagnostics_page: 1,
             rules: Vec::new(),
             consensus: Consensus::unknown(),
             log: VecDeque::new(),
@@ -221,16 +224,27 @@ impl App {
         }
     }
 
-    /// Updates diagnostics navigation to the rendered table capacities.
-    pub fn set_diagnostics_max_offset(&mut self, offset: usize) {
-        self.diagnostics_max_offset = offset;
-        self.diagnostics_offset = self.diagnostics_offset.min(offset);
+    /// Updates diagnostics navigation to the rendered tables: their last
+    /// useful offset and page step, from `ui::diagnostics::bounds`. `None`
+    /// (no table can be drawn) keeps the saved position and bounds.
+    pub fn set_diagnostics_bounds(&mut self, bounds: Option<(usize, usize)>) {
+        let Some((last, page)) = bounds else {
+            return;
+        };
+        self.diagnostics_max_offset = last;
+        self.diagnostics_page = page.max(1);
+        self.diagnostics_offset = self.diagnostics_offset.min(last);
     }
 
     /// Processes after the kernel-thread setting and the name filter, in the
     /// current sort order. Ties break by PID so the order is stable.
     pub fn visible_processes(&self) -> Vec<&ProcessInfo> {
-        let Some(list) = self.snapshot.as_ref().and_then(|s| s.processes.value()) else {
+        self.visible_in(self.snapshot.as_ref())
+    }
+
+    /// The processes of `snapshot` as `visible_processes` lists them.
+    fn visible_in<'a>(&self, snapshot: Option<&'a Snapshot>) -> Vec<&'a ProcessInfo> {
+        let Some(list) = snapshot.and_then(|s| s.processes.value()) else {
             return Vec::new();
         };
         let needle = self.procs.filter.to_lowercase();
@@ -250,16 +264,9 @@ impl App {
             (SortKey::Memory, false) => out.sort_by_key(|p| (p.memory_bytes, p.pid)),
             (SortKey::Pid, true) => out.sort_by_key(|p| Reverse(p.pid)),
             (SortKey::Pid, false) => out.sort_by_key(|p| p.pid),
-            (SortKey::Cpu, true) => out.sort_by(|a, b| {
-                b.cpu_percent
-                    .total_cmp(&a.cpu_percent)
-                    .then(a.pid.cmp(&b.pid))
-            }),
-            (SortKey::Cpu, false) => out.sort_by(|a, b| {
-                a.cpu_percent
-                    .total_cmp(&b.cpu_percent)
-                    .then(a.pid.cmp(&b.pid))
-            }),
+            (SortKey::Cpu, descending) => {
+                out.sort_by(|a, b| a.cmp_cpu(b, descending).then(a.pid.cmp(&b.pid)))
+            }
         }
         out
     }
@@ -296,7 +303,6 @@ pub enum Effect {
 
 impl App {
     pub fn apply_snapshot(&mut self, s: Snapshot) {
-        let old_index = self.selected_index();
         let eval = self.engine.evaluate(&s, &self.config.alerts);
         if eval
             .events
@@ -352,9 +358,16 @@ impl App {
             }
         }
         self.utc_offset_secs = crate::clock::local_offset_secs((s.taken_at_ms / 1000) as i64);
-        self.snapshot = Some(s);
+        let old = self.snapshot.replace(s);
         self.diagnostics_offset = self.diagnostics_offset.min(self.diagnostics_max_offset);
-        self.clamp_selection(old_index);
+        // The old rank is the fallback when the selected process is gone;
+        // it is only worked out then, so a normal refresh sorts one list.
+        self.clamp_selection_with(|app| {
+            app.visible_in(old.as_ref())
+                .iter()
+                .position(|p| Some(p.pid) == app.procs.selected_pid)
+                .unwrap_or(0)
+        });
     }
 
     /// Updates the process viewport after a terminal resize.
@@ -371,6 +384,12 @@ impl App {
     }
 
     fn clamp_selection(&mut self, fallback: usize) {
+        self.clamp_selection_with(|_| fallback);
+    }
+
+    /// Keeps the selected process when it is still listed, else selects the
+    /// row at the rank `fallback` gives, clamped to the list.
+    fn clamp_selection_with(&mut self, fallback: impl FnOnce(&Self) -> usize) {
         // Missing data does not establish that the selected process exited.
         if self
             .snapshot
@@ -384,7 +403,7 @@ impl App {
         let index = list
             .iter()
             .position(|p| Some(p.pid) == self.procs.selected_pid)
-            .unwrap_or(fallback.min(len.saturating_sub(1)));
+            .unwrap_or_else(|| fallback(self).min(len.saturating_sub(1)));
         self.procs.selected_pid = list.get(index).map(|p| p.pid);
         self.scroll_process_selection(index, len);
     }
@@ -542,10 +561,10 @@ impl App {
                     K::Char('k') | K::Up => self.diagnostics_offset.saturating_sub(1),
                     K::PageDown => self
                         .diagnostics_offset
-                        .saturating_add(self.page_size.max(1)),
+                        .saturating_add(self.diagnostics_page),
                     K::PageUp => self
                         .diagnostics_offset
-                        .saturating_sub(self.page_size.max(1)),
+                        .saturating_sub(self.diagnostics_page),
                     K::Char('g') => 0,
                     _ => last,
                 }
@@ -602,7 +621,7 @@ mod tests {
             pid,
             name: name.into(),
             user: "u".into(),
-            cpu_percent: cpu,
+            cpu_percent: Reading::Available(cpu),
             memory_bytes: mem,
             state: "sleep".into(),
             kernel_thread: kernel,

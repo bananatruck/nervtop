@@ -97,7 +97,7 @@ fn processes(ids: &[u32]) -> Snapshot {
                 pid: *id,
                 name: format!("p{id}"),
                 user: "u".into(),
-                cpu_percent: *id as f32,
+                cpu_percent: Reading::Available(*id as f32),
                 memory_bytes: *id as u64,
                 state: "run".into(),
                 kernel_thread: false,
@@ -568,12 +568,10 @@ fn disk_subjects_sorted_and_removed() {
         vec!["/", "/z"]
     );
     s.disks = Reading::Available(vec![]);
-    assert!(
-        !e.evaluate(&s, &instant())
-            .events
-            .iter()
-            .any(|e| e.rule == RuleId::Disk)
-    );
+    let emptied = e.evaluate(&s, &instant());
+    // The disk rules are removed, not kept silently.
+    assert!(!emptied.rules.iter().any(|r| r.rule == RuleId::Disk));
+    assert!(!emptied.events.iter().any(|e| e.rule == RuleId::Disk));
 }
 #[test]
 fn hottest_sensor() {

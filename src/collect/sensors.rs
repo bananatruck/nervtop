@@ -1,4 +1,4 @@
-use super::{Source, entries, number, read};
+use super::{Source, entries, entries_checked, number, read};
 use crate::model::{Fan, Reading, SensorKind, SensorStats, TempSensor};
 use std::path::PathBuf;
 pub struct Sensors {
@@ -9,6 +9,16 @@ impl Sensors {
         Self { root }
     }
 }
+/// Whether a temperature channel's `_input` is in millidegrees Celsius, as
+/// the hwmon ABI says it should be. vt1211 scales only temp2 itself: temp1
+/// is a raw thermal diode reading and temp3 to temp7 are thermistor pin
+/// voltages in millivolts, both needing board-specific calibration in
+/// userspace (Documentation/hwmon/vt1211.rst), so they are left out rather
+/// than shown as a wrong temperature.
+fn reports_celsius(chip: &str, stem: &str) -> bool {
+    chip != "vt1211" || stem == "temp2"
+}
+
 impl Source for Sensors {
     type Output = SensorStats;
     fn sample(&mut self) -> Reading<SensorStats> {
@@ -16,7 +26,12 @@ impl Source for Sensors {
             temps: Vec::new(),
             fans: Vec::new(),
         };
-        for dir in entries(self.root.join("sys/class/hwmon")) {
+        let chips = match entries_checked(self.root.join("sys/class/hwmon")) {
+            Ok(chips) => chips,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(_) => return Reading::unavailable("hwmon sensors not readable"),
+        };
+        for dir in chips {
             if !dir
                 .file_name()
                 .is_some_and(|n| n.to_string_lossy().starts_with("hwmon"))
@@ -59,6 +74,9 @@ impl Source for Sensors {
                     .strip_prefix("temp")
                     .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
                 {
+                    if !reports_celsius(&chip, stem) {
+                        continue;
+                    }
                     if let Some(value) = number::<i64>(&path) {
                         stats.temps.push(TempSensor {
                             chip: chip.clone(),
@@ -97,6 +115,52 @@ pub(crate) mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, text).unwrap();
     }
+    /// An absent or empty hwmon class has no sensors; a class that exists
+    /// but cannot be listed may have some, and says so.
+    #[test]
+    fn an_unlistable_hwmon_class_is_not_reported_as_absent() {
+        let t = tempfile::tempdir().unwrap();
+        let mut sensors = Sensors::new(t.path().into());
+        assert_eq!(sensors.sample().reason(), Some("no hwmon sensors"));
+        std::fs::create_dir_all(t.path().join("sys/class/hwmon")).unwrap();
+        assert_eq!(sensors.sample().reason(), Some("no hwmon sensors"));
+        std::fs::remove_dir(t.path().join("sys/class/hwmon")).unwrap();
+        // A regular file fails to list for every user, like a permission error.
+        std::fs::write(t.path().join("sys/class/hwmon"), "").unwrap();
+        assert_eq!(
+            sensors.sample().reason(),
+            Some("hwmon sensors not readable")
+        );
+    }
+
+    /// vt1211 reports only temp2 in millidegrees Celsius; temp1 is a raw
+    /// thermal diode reading and temp3 to temp7 are thermistor pin voltages
+    /// in millivolts, which need board-specific calibration in userspace
+    /// (Documentation/hwmon/vt1211.rst), so they are not shown as Celsius.
+    #[test]
+    fn vt1211_channels_without_celsius_scaling_are_left_out() {
+        let t = tempfile::tempdir().unwrap();
+        put(t.path(), "sys/class/hwmon/hwmon0/name", "vt1211");
+        put(t.path(), "sys/class/hwmon/hwmon0/temp1_input", "1200");
+        put(t.path(), "sys/class/hwmon/hwmon0/temp2_input", "41000");
+        put(t.path(), "sys/class/hwmon/hwmon0/temp3_input", "900");
+        put(t.path(), "sys/class/hwmon/hwmon0/temp7_input", "1500");
+        put(t.path(), "sys/class/hwmon/hwmon1/name", "nct6775");
+        put(t.path(), "sys/class/hwmon/hwmon1/temp1_input", "35000");
+        let s = Sensors::new(t.path().into()).sample();
+        let temps: Vec<(&str, &str, f64)> = s
+            .value()
+            .unwrap()
+            .temps
+            .iter()
+            .map(|t| (t.chip.as_str(), t.label.as_str(), t.celsius))
+            .collect();
+        assert_eq!(
+            temps,
+            [("vt1211", "temp2", 41.0), ("nct6775", "temp1", 35.0)]
+        );
+    }
+
     #[test]
     fn faulted_channels_are_skipped() {
         let t = tempfile::tempdir().unwrap();

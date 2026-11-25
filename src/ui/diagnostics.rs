@@ -111,8 +111,11 @@ fn table_areas(area: Rect, app: &App) -> [Rect; 6] {
     ]
 }
 
-/// Last shared offset that moves at least one rendered diagnostics table.
-pub fn max_offset(area: Rect, app: &App) -> usize {
+/// Navigation bounds of the rendered diagnostics tables, which share one
+/// scroll offset: the last offset that moves at least one table, and a page
+/// step no larger than the smallest data-row capacity among the tables that
+/// scroll, so a page never skips a row of any table.
+pub fn bounds(area: Rect, app: &App) -> (usize, usize) {
     let areas = table_areas(area, app).map(|area| panel_block("", &app.palette).inner(area));
     let mut rows = [0; 6];
     if let Some(snapshot) = &app.snapshot {
@@ -143,12 +146,17 @@ pub fn max_offset(area: Rect, app: &App) -> usize {
         areas[4].height as usize > rows[4],
         areas[5].height >= 4,
     ];
-    rows.into_iter()
-        .zip(areas)
-        .zip(headers)
-        .map(|((rows, area), header)| maximum_offset(rows, area, header))
-        .max()
-        .unwrap_or(0)
+    let mut last = 0;
+    let mut page: Option<usize> = None;
+    for ((rows, area), header) in rows.into_iter().zip(areas).zip(headers) {
+        let max = maximum_offset(rows, area, header);
+        if max > 0 {
+            last = last.max(max);
+            let capacity = area.height.saturating_sub(u16::from(header)) as usize;
+            page = Some(page.map_or(capacity, |p| p.min(capacity)));
+        }
+    }
+    (last, page.unwrap_or(1).max(1))
 }
 
 /// Draws the DIAGNOSTICS screen using `Table` widgets for all subsystems.
@@ -589,6 +597,8 @@ fn draw_io_table(frame: &mut Frame, area: Rect, app: &App) {
 
     let show_device = inner.width >= 56;
     let mut raw_rows: Vec<([String; 3], [Style; 3])> = Vec::new();
+    // The rate cell of each row as it reads when it must be narrow: see `directions`.
+    let mut compact_rates: Vec<String> = Vec::new();
 
     match &snap.disks {
         Reading::Unavailable(r) => {
@@ -600,6 +610,7 @@ fn draw_io_table(frame: &mut Frame, area: Rect, app: &App) {
                 ],
                 [muted, unknown, muted],
             ));
+            compact_rates.push(String::new());
         }
         Reading::Available(disks) => {
             for d in disks {
@@ -608,19 +619,27 @@ fn draw_io_table(frame: &mut Frame, area: Rect, app: &App) {
                 } else {
                     d.mount_point.clone()
                 };
-                let (rw_s, rw_st) = match (&d.read_bps, &d.write_bps) {
-                    (Reading::Available(r), Reading::Available(w)) => (
-                        format!("R {} W {}", fmt::rate(*r), fmt::rate(*w)),
-                        text_style,
-                    ),
-                    (Reading::Unavailable(r), _) | (_, Reading::Unavailable(r)) => {
-                        (fmt::unavailable_str(r, 20), unknown)
-                    }
-                };
+                let (rw_s, rw_st) = directions(
+                    ("R", &d.read_bps),
+                    ("W", &d.write_bps),
+                    text_style,
+                    unknown,
+                    false,
+                );
                 raw_rows.push((
                     [label, fmt::bytes_pair(d.used_bytes(), d.total_bytes), rw_s],
                     [text_style, muted, rw_st],
                 ));
+                compact_rates.push(
+                    directions(
+                        ("R", &d.read_bps),
+                        ("W", &d.write_bps),
+                        text_style,
+                        unknown,
+                        true,
+                    )
+                    .0,
+                );
             }
         }
     }
@@ -635,18 +654,27 @@ fn draw_io_table(frame: &mut Frame, area: Rect, app: &App) {
                 ],
                 [muted, unknown, muted],
             ));
+            compact_rates.push(String::new());
         }
         Reading::Available(ifaces) => {
             for n in sorted_interfaces(ifaces) {
-                let (rx_tx_s, rx_tx_st) = match (&n.rx_bps, &n.tx_bps) {
-                    (Reading::Available(rx), Reading::Available(tx)) => (
-                        format!("RX {} TX {}", fmt::rate(*rx), fmt::rate(*tx)),
+                let (rx_tx_s, rx_tx_st) = directions(
+                    ("RX", &n.rx_bps),
+                    ("TX", &n.tx_bps),
+                    text_style,
+                    unknown,
+                    false,
+                );
+                compact_rates.push(
+                    directions(
+                        ("RX", &n.rx_bps),
+                        ("TX", &n.tx_bps),
                         text_style,
-                    ),
-                    (Reading::Unavailable(r), _) | (_, Reading::Unavailable(r)) => {
-                        (fmt::unavailable_str(r, 20), unknown)
-                    }
-                };
+                        unknown,
+                        true,
+                    )
+                    .0,
+                );
                 raw_rows.push((
                     [
                         n.name.clone(),
@@ -671,7 +699,24 @@ fn draw_io_table(frame: &mut Frame, area: Rect, app: &App) {
     }
 
     let w = inner.width as usize;
-    let include_rates = col_w[0] + col_w[1] + col_w[2] + 2 <= w;
+    let fits = |rate_w: usize| col_w[0] + col_w[1] + rate_w + 2 <= w;
+    let mut include_rates = fits(col_w[2]);
+    // An unavailable direction must not cost an available one its place: before
+    // the rate column is dropped, unavailable directions shrink to "-".
+    if !include_rates {
+        let compact_w = compact_rates
+            .iter()
+            .map(|c| c.chars().count())
+            .max()
+            .unwrap_or(0);
+        if fits(compact_w.max(1)) {
+            for ((cells, _), compact) in raw_rows.iter_mut().zip(&compact_rates) {
+                cells[2].clone_from(compact);
+            }
+            col_w[2] = compact_w.max(1);
+            include_rates = true;
+        }
+    }
 
     if include_rates {
         let rows: Vec<Row<'static>> = raw_rows
@@ -719,6 +764,39 @@ fn draw_io_table(frame: &mut Frame, area: Rect, app: &App) {
     }
 }
 
+/// The two rates of one device, each shown on its own, so a direction that
+/// is unavailable does not hide the other's reading. Both unavailable show
+/// the first reason, as one reading.
+///
+/// `compact` is the form used when the full one does not fit: an unavailable
+/// direction is "-", as missing values are in the GPU table, and a device with
+/// both directions out is a single "-". "-" is narrower than any rate, so the
+/// compact column fits whenever the column would fit with every direction
+/// available, and an unavailable label can never push an available reading
+/// off screen.
+fn directions(
+    first: (&str, &Reading<f64>),
+    second: (&str, &Reading<f64>),
+    text_style: Style,
+    unknown: Style,
+    compact: bool,
+) -> (String, Style) {
+    if let (Reading::Unavailable(reason), Reading::Unavailable(_)) = (first.1, second.1) {
+        let text = if compact {
+            "-".to_string()
+        } else {
+            fmt::unavailable_str(reason, 20)
+        };
+        return (text, unknown);
+    }
+    let missing = if compact { "-" } else { "unavailable" };
+    let part = |(label, reading): (&str, &Reading<f64>)| match reading {
+        Reading::Available(v) => format!("{label} {}", fmt::rate(*v)),
+        Reading::Unavailable(_) => format!("{label} {missing}"),
+    };
+    (format!("{} {}", part(first), part(second)), text_style)
+}
+
 fn draw_rules_table(frame: &mut Frame, area: Rect, app: &App) {
     let p = &app.palette;
     let block = panel_block("ALERT RULES", p);
@@ -753,52 +831,87 @@ fn draw_rules_table(frame: &mut Frame, area: Rect, app: &App) {
     let muted = Style::default().fg(p.muted);
     let unknown = Style::default().fg(p.unknown);
 
-    // Other 5 columns take 10 + 6 + 4 + 4 + 8 + 5 spaces = 37 columns; the
-    // rule column gets the rest. Each row fits on its own, so one long
-    // subject (a GPU name) never hides the subjects of the other rows.
-    let rule_w = (inner.width as usize).saturating_sub(37);
-
-    let rows: Vec<Row<'static>> = rules_slice
+    // VALUE is as wide as its widest value ("unavailable", "0.09/core"),
+    // so a reading is never clipped. When the table is too narrow for every
+    // column, WARN and CRIT go first and then LABEL; RULE keeps at least
+    // 12 cells. Each row fits its rule name on its own, so one long subject
+    // (a GPU name) never hides the subjects of the other rows.
+    let values: Vec<Span<'static>> = rules_slice
         .iter()
-        .map(|r| {
-            let key_subj = fit_rule_name(r.rule.key(), &r.subject, rule_w);
-            let val_span = match r.value {
-                Some(v) => Span::styled(format_rule_value(r.rule, v), text_style),
-                None => {
-                    let reason = r.note.as_deref().unwrap_or("no data");
-                    Span::styled(fmt::unavailable_str(reason, 11), unknown)
-                }
-            };
-            let lvl_color = fmt::level_color(p, r.level);
-            Row::new(vec![
-                Cell::from(Span::styled(key_subj, text_style)),
-                Cell::from(Span::styled(r.rule.label(), muted)),
-                Cell::from(val_span),
-                Cell::from(Span::styled(format!("{:.1}", r.warn), muted)),
-                Cell::from(Span::styled(format!("{:.1}", r.crit), muted)),
-                Cell::from(Span::styled(
-                    r.level.label(),
-                    Style::default().fg(lvl_color).add_modifier(Modifier::BOLD),
-                )),
-            ])
+        .map(|r| match r.value {
+            Some(v) => Span::styled(format_rule_value(r.rule, v), text_style),
+            None => {
+                let reason = r.note.as_deref().unwrap_or("no data");
+                Span::styled(fmt::unavailable_str(reason, 11), unknown)
+            }
         })
         .collect();
-
-    let max_level_len = rules_slice
+    let value_w = values
+        .iter()
+        .map(|v| fmt::display_width(&v.content))
+        .max()
+        .unwrap_or(0)
+        .max("VALUE".len());
+    let level_w = rules_slice
         .iter()
         .map(|r| r.level.label().len())
         .max()
         .unwrap_or(7)
-        .max(5) as u16;
+        .max("LEVEL".len());
+    // Cells after RULE, each with the space before it.
+    let after_rule = |label: bool, limits: bool| {
+        (value_w + 1) + (level_w + 1) + if label { 11 } else { 0 } + if limits { 10 } else { 0 }
+    };
+    let width = inner.width as usize;
+    let fits = |label: bool, limits: bool| 12 + after_rule(label, limits) <= width;
+    let (show_label, show_limits) = if fits(true, true) {
+        (true, true)
+    } else if fits(true, false) {
+        (true, false)
+    } else {
+        (false, false)
+    };
+    let rule_w = width.saturating_sub(after_rule(show_label, show_limits));
 
-    let widths = [
-        Constraint::Min(12),
-        Constraint::Length(10),
-        Constraint::Length(6),
-        Constraint::Length(4),
-        Constraint::Length(4),
-        Constraint::Length(max_level_len),
-    ];
+    let rows: Vec<Row<'static>> = rules_slice
+        .iter()
+        .zip(values)
+        .map(|(r, value)| {
+            let lvl_color = fmt::level_color(p, r.level);
+            let mut cells = vec![Cell::from(Span::styled(
+                fit_rule_name(r.rule.key(), &r.subject, rule_w),
+                text_style,
+            ))];
+            if show_label {
+                cells.push(Cell::from(Span::styled(r.rule.label(), muted)));
+            }
+            cells.push(Cell::from(value));
+            if show_limits {
+                cells.push(Cell::from(Span::styled(format!("{:.1}", r.warn), muted)));
+                cells.push(Cell::from(Span::styled(format!("{:.1}", r.crit), muted)));
+            }
+            cells.push(Cell::from(Span::styled(
+                r.level.label(),
+                Style::default().fg(lvl_color).add_modifier(Modifier::BOLD),
+            )));
+            Row::new(cells)
+        })
+        .collect();
+
+    let mut widths = vec![Constraint::Min(12)];
+    let mut header = vec!["RULE"];
+    if show_label {
+        widths.push(Constraint::Length(10));
+        header.push("LABEL");
+    }
+    widths.push(Constraint::Length(value_w as u16));
+    header.push("VALUE");
+    if show_limits {
+        widths.extend([Constraint::Length(4), Constraint::Length(4)]);
+        header.extend(["WARN", "CRIT"]);
+    }
+    widths.push(Constraint::Length(level_w as u16));
+    header.push("LEVEL");
 
     let mut table = Table::new(
         visible_rows(
@@ -812,8 +925,7 @@ fn draw_rules_table(frame: &mut Frame, area: Rect, app: &App) {
     .column_spacing(1);
     if inner.height as usize > rules_slice.len() {
         table = table.header(
-            Row::new(vec!["RULE", "LABEL", "VALUE", "WARN", "CRIT", "LEVEL"])
-                .style(Style::default().fg(p.heading).add_modifier(Modifier::BOLD)),
+            Row::new(header).style(Style::default().fg(p.heading).add_modifier(Modifier::BOLD)),
         );
     }
     frame.render_widget(table, inner);
@@ -982,6 +1094,238 @@ mod tests {
             "capacity column lost: {row:?}"
         );
     }
+    /// A rule's value is never clipped: VALUE is as wide as its widest
+    /// value, and a narrow table drops optional columns instead.
+    #[test]
+    fn rule_values_are_shown_whole() {
+        use crate::alert::RuleId;
+        let mut app = nominal_app();
+        app.screen = Screen::Diagnostics;
+        let load = app
+            .rules
+            .iter_mut()
+            .find(|r| r.rule == RuleId::Load)
+            .unwrap();
+        load.value = Some(0.09);
+        load.subject = "loadprobe".into();
+        let missing = app
+            .rules
+            .iter_mut()
+            .find(|r| r.rule == RuleId::Memory)
+            .unwrap();
+        missing.value = None;
+        missing.subject = "memprobe".into();
+        // Rows are found by their rule key, which leads the RULE cell and is
+        // never truncated; the subject after it can be ("loadpro…" at 120x40).
+        for (width, height) in [(200, 60), (120, 40), (80, 24)] {
+            let lines = buffer_lines(&render(&app, width, height));
+            for (key, value) in [("load", "0.09/core"), ("memory", "unavailable")] {
+                let row = lines
+                    .iter()
+                    .find_map(|l| {
+                        l.split('│')
+                            .find(|cell| cell.starts_with(&format!("{key} ")))
+                    })
+                    .unwrap_or_else(|| panic!("{width}x{height}: no {key} rule row"));
+                assert!(row.contains(value), "{width}x{height}: {row:?}");
+            }
+        }
+        // At the widest size both rows are on screen.
+        let wide = buffer_lines(&render(&app, 200, 60)).join("\n");
+        assert!(wide.contains("loadprobe") && wide.contains("memprobe"));
+    }
+
+    /// One unavailable direction does not hide the other's reading.
+    #[test]
+    fn each_available_io_direction_stays_visible() {
+        let mut app = nominal_app();
+        app.screen = Screen::Diagnostics;
+        let snapshot = app.snapshot.as_mut().unwrap();
+        let Reading::Available(nets) = &mut snapshot.network else {
+            unreachable!()
+        };
+        nets[0].rx_bps = Reading::Available(2048.0);
+        nets[0].tx_bps = Reading::unavailable("counter not readable");
+        let Reading::Available(disks) = &mut snapshot.disks else {
+            unreachable!()
+        };
+        disks[0].read_bps = Reading::unavailable("warming up");
+        disks[0].write_bps = Reading::Available(4096.0);
+        let text = buffer_lines(&render(&app, 200, 60)).join("\n");
+        let rx = format!("RX {} TX unavailable", crate::ui::fmt::rate(2048.0));
+        let w = format!("R unavailable W {}", crate::ui::fmt::rate(4096.0));
+        assert!(text.contains(&rx), "{rx} missing\n{text}");
+        assert!(text.contains(&w), "{w} missing\n{text}");
+    }
+
+    /// An available direction is never dropped to make room for an
+    /// unavailable one. A fixture with short names and totals leaves room for
+    /// the rate column at 80x24; every mix of available and unavailable
+    /// directions must keep each available reading on screen there, and wide
+    /// terminals keep the full "unavailable" labels.
+    #[test]
+    fn available_directions_survive_unavailable_neighbours_at_every_size() {
+        use crate::ui::fmt::unavailable_str;
+        let zero = || Reading::Available(0.0);
+        // "absent" makes the both-unavailable label "unavailable (absent)", 20
+        // cells: wider than the 18 left for rates at 80x24 in this fixture.
+        let patterns: [(&str, bool, bool, &str); 5] = [
+            ("both available", true, true, "warming up"),
+            ("first unavailable", false, true, "warming up"),
+            ("second unavailable", true, false, "warming up"),
+            ("both unavailable", false, false, "warming up"),
+            (
+                "both unavailable with a short reason",
+                false,
+                false,
+                "absent",
+            ),
+        ];
+        for (name, first_ok, second_ok, reason) in patterns {
+            let out = || Reading::unavailable(reason);
+            let mut app = nominal_app();
+            app.screen = Screen::Diagnostics;
+            let snapshot = app.snapshot.as_mut().unwrap();
+            let Reading::Available(disks) = &mut snapshot.disks else {
+                unreachable!()
+            };
+            disks.truncate(1);
+            disks[0].mount_point = "/".into();
+            disks[0].total_bytes = 0;
+            disks[0].available_bytes = 0;
+            disks[0].read_bps = if first_ok { zero() } else { out() };
+            disks[0].write_bps = if second_ok { zero() } else { out() };
+            let Reading::Available(nets) = &mut snapshot.network else {
+                unreachable!()
+            };
+            nets.truncate(1);
+            nets[0].name = "qa".into();
+            nets[0].rx_total_bytes = Reading::Available(0);
+            nets[0].tx_total_bytes = Reading::Available(0);
+            nets[0].rx_bps = if first_ok { zero() } else { out() };
+            nets[0].tx_bps = if second_ok { zero() } else { out() };
+            let mut always = nets[0].clone();
+            always.name = "qb".into();
+            always.rx_bps = zero();
+            always.tx_bps = zero();
+            nets.push(always);
+
+            for (width, height) in [(80, 24), (200, 60)] {
+                let lines = buffer_lines(&render(&app, width, height));
+                let cell = |lead: &str| -> String {
+                    lines
+                        .iter()
+                        .find_map(|l| l.split('│').find(|c| c.starts_with(lead)))
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "{name} {width}x{height}: no {lead:?} row\n{}",
+                                lines.join("\n")
+                            )
+                        })
+                        .to_string()
+                };
+                let at = format!("{name} {width}x{height}");
+                // The fully available interface keeps both readings.
+                let qb = cell("qb ");
+                assert!(qb.contains("RX 0 B/s TX 0 B/s"), "{at}: {qb:?}");
+                for (row, (a, b)) in [(cell("qa "), ("RX", "TX")), (cell("/ "), ("R", "W"))] {
+                    for (label, ok) in [(a, first_ok), (b, second_ok)] {
+                        if ok {
+                            let shown = format!("{label} 0 B/s");
+                            assert!(row.contains(&shown), "{at}: {shown} lost: {row:?}");
+                        } else if first_ok || second_ok {
+                            // Full label when it fits, "-" when only the compact form does.
+                            let marker = if width == 200 { "unavailable" } else { "-" };
+                            let shown = format!("{label} {marker}");
+                            assert!(row.contains(&shown), "{at}: {shown} missing: {row:?}");
+                        }
+                    }
+                    if !first_ok && !second_ok {
+                        let full = unavailable_str(reason, 20);
+                        // The full label when it fits beside qb's readings, else "-".
+                        if width == 200 || full.chars().count() <= 18 {
+                            assert!(row.contains(&full), "{at}: {full} missing: {row:?}");
+                        } else {
+                            assert!(row.trim_end().ends_with(" -"), "{at}: no marker: {row:?}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Nominal app on the diagnostics screen with `count` temperature rows.
+    fn app_with_sensors(count: usize) -> crate::app::App {
+        let mut app = nominal_app();
+        app.screen = Screen::Diagnostics;
+        let snapshot = app.snapshot.as_mut().unwrap();
+        let Reading::Available(sensors) = &mut snapshot.sensors else {
+            unreachable!()
+        };
+        let template = sensors.temps[0].clone();
+        sensors.temps = (0..count)
+            .map(|i| crate::model::TempSensor {
+                chip: "probe".into(),
+                label: format!("{i:02}"),
+                ..template.clone()
+            })
+            .collect();
+        sensors.fans.clear();
+        app
+    }
+
+    fn key(app: &mut crate::app::App, code: crossterm::event::KeyCode) {
+        use crossterm::event::{KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
+    }
+
+    /// A page moves the shared offset by no more than the smallest table
+    /// that scrolls can show, so no row of any table is skipped; the process
+    /// page size (16 rows at 80x24) is not a diagnostics page.
+    #[test]
+    fn page_keys_move_diagnostics_without_skipping_rows() {
+        use crossterm::event::KeyCode;
+        let mut app = app_with_sensors(40);
+        let shown = buffer_lines(&crate::screenshot::render(&mut app, 80, 24))
+            .iter()
+            .filter(|line| line.contains("probe:"))
+            .count();
+        assert!(shown >= 1);
+        key(&mut app, KeyCode::PageDown);
+        assert!(
+            (1..=shown).contains(&app.diagnostics_offset),
+            "moved {} with {shown} sensor rows shown",
+            app.diagnostics_offset
+        );
+        let after = app.diagnostics_offset;
+        key(&mut app, KeyCode::PageDown);
+        assert_eq!(app.diagnostics_offset, after * 2);
+        key(&mut app, KeyCode::PageUp);
+        assert_eq!(app.diagnostics_offset, after);
+    }
+
+    /// A frame too small to draw any table does not reset the saved
+    /// position; it is clamped again once the tables can be drawn.
+    #[test]
+    fn a_too_small_frame_keeps_the_diagnostics_position() {
+        use crossterm::event::KeyCode;
+        let mut app = app_with_sensors(40);
+        crate::screenshot::render(&mut app, 80, 24);
+        for _ in 0..5 {
+            key(&mut app, KeyCode::Down);
+        }
+        assert_eq!(app.diagnostics_offset, 5);
+        crate::screenshot::render(&mut app, 20, 5);
+        assert_eq!(app.diagnostics_offset, 5);
+        crate::screenshot::render(&mut app, 80, 24);
+        assert_eq!(app.diagnostics_offset, 5);
+        // Once the tables fit, the position is clamped as before.
+        crate::screenshot::render(&mut app, 20, 5);
+        app.apply_snapshot(nominal_app().snapshot.unwrap());
+        crate::screenshot::render(&mut app, 200, 60);
+        assert_eq!(app.diagnostics_offset, 0);
+    }
+
     #[test]
     fn diagnostics_bottom_tracks_resizes_and_shorter_inventories() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};

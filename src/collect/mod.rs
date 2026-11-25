@@ -15,6 +15,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub trait Source: Send {
     type Output;
     fn sample(&mut self) -> Reading<Self::Output>;
+    /// Forgets every rate baseline, so the next rates cover a fresh window.
+    /// Called when sampling resumes after a pause; an ordinary failed poll
+    /// does not call it and may still reuse the last valid baseline.
+    fn restart(&mut self) {}
 }
 
 /// Host identity and uptime. Each field carries its own availability.
@@ -44,6 +48,25 @@ pub struct Collector {
 impl Collector {
     pub fn new(sources: Sources) -> Collector {
         Collector { sources, seq: 0 }
+    }
+
+    /// Replaces the network source, for tests of the sampling loop.
+    #[cfg(test)]
+    pub fn replace_network(&mut self, network: Box<dyn Source<Output = Vec<NetInterface>>>) {
+        self.sources.network = network;
+    }
+
+    /// Forgets every source's rate baselines; see [`Source::restart`].
+    pub fn restart(&mut self) {
+        let s = &mut self.sources;
+        s.cpu.restart();
+        s.memory.restart();
+        s.disks.restart();
+        s.network.restart();
+        s.processes.restart();
+        s.sensors.restart();
+        s.gpus.restart();
+        s.battery.restart();
     }
 
     /// Takes one sample from every source.
@@ -171,6 +194,15 @@ fn read(path: impl AsRef<Path>) -> Option<String> {
 }
 fn number<T: std::str::FromStr>(path: impl AsRef<Path>) -> Option<T> {
     read(path)?.parse().ok()
+}
+/// The sorted entries of a directory, or the error that stopped the listing:
+/// opening it, or reading any one entry, so no entry is silently left out.
+fn entries_checked(path: impl AsRef<Path>) -> std::io::Result<Vec<PathBuf>> {
+    let mut paths = std::fs::read_dir(path)?
+        .map(|e| e.map(|e| e.path()))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    paths.sort();
+    Ok(paths)
 }
 fn entries(path: impl AsRef<Path>) -> Vec<PathBuf> {
     let mut paths: Vec<_> = std::fs::read_dir(path)

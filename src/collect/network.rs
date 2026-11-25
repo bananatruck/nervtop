@@ -48,6 +48,10 @@ fn display_name(name: &OsStr) -> String {
 impl Source for Network {
     type Output = Vec<NetInterface>;
 
+    fn restart(&mut self) {
+        self.rates.clear();
+    }
+
     fn sample(&mut self) -> Reading<Self::Output> {
         let now = Instant::now();
         let mut seen = BTreeSet::new();
@@ -70,12 +74,19 @@ impl Source for Network {
             let rx = number::<u64>(dir.join("statistics/rx_bytes"));
             let tx = number::<u64>(dir.join("statistics/tx_bytes"));
             // A name can be reused while the counters are being read. Never
-            // attach the replacement's counters to the old device baseline.
+            // attach the replacement's counters to the old device baseline,
+            // and keep the row with nothing from the mixed read, so the other
+            // interfaces are not summed as if they were the whole total.
             if number::<u32>(dir.join("ifindex")) != Some(ifindex) {
-                self.rates.remove(&(ifindex, name));
-                continue;
-            }
-            if rx == Some(0) && tx == Some(0) {
+                self.rates.remove(&(ifindex, name.clone()));
+                const CHANGED: &str = "interface changed while read";
+                interfaces.push(NetInterface {
+                    name: display_name(&name),
+                    rx_bps: Reading::unavailable(CHANGED),
+                    tx_bps: Reading::unavailable(CHANGED),
+                    rx_total_bytes: Reading::unavailable(CHANGED),
+                    tx_total_bytes: Reading::unavailable(CHANGED),
+                });
                 continue;
             }
             let key = (ifindex, name.clone());
@@ -83,6 +94,11 @@ impl Source for Network {
             let (rx_baseline, tx_baseline) = self.rates.entry(key).or_default();
             let rx_bps = rx_baseline.sample(rx, now);
             let tx_bps = tx_baseline.sample(tx, now);
+            // An interface that has never carried traffic is not shown, but
+            // its counters stay its baseline, so its first traffic has a rate.
+            if rx == Some(0) && tx == Some(0) {
+                continue;
+            }
             interfaces.push(NetInterface {
                 name: display_name(&name),
                 rx_bps,
@@ -168,7 +184,18 @@ mod tests {
         });
         let sample = network.sample();
         replacement.join().unwrap();
-        assert!(sample.value().unwrap().is_empty());
+        // The row stays, with nothing from the mixed read, so no total is
+        // summed from the interfaces that happened to read cleanly.
+        let changed = &sample.value().unwrap()[0];
+        assert_eq!(changed.name, "eth0");
+        for reason in [
+            changed.rx_bps.reason(),
+            changed.tx_bps.reason(),
+            changed.rx_total_bytes.reason(),
+            changed.tx_total_bytes.reason(),
+        ] {
+            assert_eq!(reason, Some("interface changed while read"));
+        }
 
         fs::remove_file(root.path().join("sys/class/net/eth0/statistics/rx_bytes")).unwrap();
         write_interface(root.path(), "eth0", 8, 1200, 2400);
@@ -176,6 +203,47 @@ mod tests {
         let interface = &recovered.value().unwrap()[0];
         assert_eq!(interface.rx_bps.reason(), Some("warming up"));
         assert_eq!(interface.tx_bps.reason(), Some("warming up"));
+    }
+
+    /// An interface that has not carried traffic yet is hidden, but its zero
+    /// counters are its baseline, so its first traffic has a rate at once.
+    #[test]
+    fn zero_counters_are_hidden_but_kept_as_a_baseline() {
+        let root = tempfile::tempdir().unwrap();
+        write_interface(root.path(), "eth0", 7, 0, 0);
+        let mut network = Network::new(root.path().into());
+        assert!(network.sample().value().unwrap().is_empty());
+        write_interface(root.path(), "eth0", 7, 1000, 500);
+        let sample = network.sample();
+        let eth0 = &sample.value().unwrap()[0];
+        assert!(eth0.rx_bps.is_available(), "{:?}", eth0.rx_bps);
+        assert!(eth0.tx_bps.is_available(), "{:?}", eth0.tx_bps);
+    }
+
+    /// After a pause, the resume sample may fail to read a counter. The
+    /// first published rate must then warm up again instead of measuring
+    /// from the counter read before the pause.
+    #[test]
+    fn a_failed_read_at_resume_does_not_keep_the_pre_pause_baseline() {
+        let root = tempfile::tempdir().unwrap();
+        write_interface(root.path(), "eth0", 7, 100, 100);
+        let mut network = Network::new(root.path().into());
+        assert!(network.sample().is_available());
+        // Resume: baselines restart, then the unpublished sample reads.
+        network.restart();
+        let rx_path = root.path().join("sys/class/net/eth0/statistics/rx_bytes");
+        fs::write(&rx_path, "unreadable").unwrap();
+        fs::write(
+            root.path().join("sys/class/net/eth0/statistics/tx_bytes"),
+            "900",
+        )
+        .unwrap();
+        assert!(network.sample().is_available());
+        write_interface(root.path(), "eth0", 7, 5000, 1000);
+        let published = network.sample();
+        let eth0 = &published.value().unwrap()[0];
+        assert_eq!(eth0.rx_bps.reason(), Some("warming up"));
+        assert!(eth0.tx_bps.is_available());
     }
 
     #[test]

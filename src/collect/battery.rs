@@ -1,4 +1,4 @@
-use super::{Source, entries, number, read};
+use super::{Source, entries_checked, number, read};
 use crate::model::{BatteryStats, BatteryStatus, Reading};
 use std::path::PathBuf;
 pub struct Battery {
@@ -12,23 +12,27 @@ impl Battery {
 impl Source for Battery {
     type Output = BatteryStats;
     fn sample(&mut self) -> Reading<BatteryStats> {
-        let list = self.root.join("sys/class/power_supply");
-        if let Err(e) = std::fs::read_dir(&list)
-            && e.kind() != std::io::ErrorKind::NotFound
-        {
-            return Reading::unavailable("power supply list not readable");
+        let supplies = match entries_checked(self.root.join("sys/class/power_supply")) {
+            Ok(supplies) => supplies,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(_) => return Reading::unavailable("power supply list not readable"),
+        };
+        // Online if any mains supply says so; offline only if there is a
+        // mains supply, every one was read and says 0, and every supply's
+        // type could be read (an unreadable one may be a mains supply that is
+        // online); otherwise unknown.
+        let mut mains: Vec<Option<u8>> = Vec::new();
+        let mut unclassified = false;
+        for supply in &supplies {
+            match read(supply.join("type")).as_deref() {
+                Some("Mains") => mains.push(number::<u8>(supply.join("online"))),
+                Some(_) => {}
+                None => unclassified = true,
+            }
         }
-        let supplies = entries(list);
-        // Online if any mains supply says so; offline only if every one was
-        // read and says 0; unknown when a read failed.
-        let mains: Vec<Option<u8>> = supplies
-            .iter()
-            .filter(|d| read(d.join("type")).as_deref() == Some("Mains"))
-            .map(|d| number::<u8>(d.join("online")))
-            .collect();
         let ac_online = if mains.iter().any(|v| matches!(v, Some(n) if *n != 0)) {
             Some(true)
-        } else if !mains.is_empty() && mains.iter().all(|v| *v == Some(0)) {
+        } else if !mains.is_empty() && !unclassified && mains.iter().all(|v| *v == Some(0)) {
             Some(false)
         } else {
             None
@@ -57,41 +61,55 @@ impl Source for Battery {
         let power = rate_of("power_now")
             .map(|v| v / 1e6)
             .or_else(|| Some(rate_of("current_now")? * n("voltage_now")? / 1e12));
-        // Keep capacity, design capacity and rate in the same native units.
-        let (now, full, design, rate) = if n("energy_now").is_some() {
-            (
-                n("energy_now"),
-                n("energy_full"),
-                n("energy_full_design"),
-                power.map(|w| w * 1e6),
-            )
-        } else {
-            (
-                n("charge_now"),
-                n("charge_full"),
-                n("charge_full_design"),
-                rate_of("current_now"),
-            )
-        };
-        let Some(percent) = n("capacity")
-            .filter(|c| *c <= 100.0)
-            .or_else(|| Some((now? / full.filter(|v| *v > 0.0)? * 100.0).min(100.0)))
-        else {
+        // Every figure uses one complete pair in one native unit: energy
+        // (µWh, with power in µW) when it has what the figure needs, else
+        // charge (µAh, with current in µA). Units are never mixed.
+        struct Units {
+            now: Option<f64>,
+            full: Option<f64>,
+            design: Option<f64>,
+            rate: Option<f64>,
+        }
+        let units = [
+            Units {
+                now: n("energy_now"),
+                full: n("energy_full"),
+                design: n("energy_full_design"),
+                rate: power.map(|w| w * 1e6),
+            },
+            Units {
+                now: n("charge_now"),
+                full: n("charge_full"),
+                design: n("charge_full_design"),
+                rate: rate_of("current_now"),
+            },
+        ];
+        let Some(percent) = n("capacity").filter(|c| *c <= 100.0).or_else(|| {
+            units
+                .iter()
+                .find_map(|u| Some((u.now? / u.full.filter(|v| *v > 0.0)? * 100.0).min(100.0)))
+        }) else {
             return Reading::unavailable("battery capacity not reported");
         };
-        let remaining = match status {
-            BatteryStatus::Charging => now.zip(full).map(|(now, full)| (full - now).max(0.0)),
-            BatteryStatus::Discharging => now,
-            BatteryStatus::Full | BatteryStatus::NotCharging | BatteryStatus::Unknown => None,
+        let hours = |u: &Units| -> Option<f64> {
+            let rate = u.rate.filter(|r| *r > 0.0)?;
+            match status {
+                BatteryStatus::Charging => Some((u.full? - u.now?).max(0.0) / rate),
+                BatteryStatus::Discharging => Some(u.now? / rate),
+                _ => None,
+            }
         };
         let time_remaining_secs =
             if !matches!(status, BatteryStatus::Charging | BatteryStatus::Discharging) {
                 Reading::unavailable("not charging or discharging")
-            } else if let Some((remaining, rate)) = remaining.zip(rate.filter(|r| *r > 0.0)) {
-                Reading::Available((remaining / rate * 3600.0) as u64)
+            } else if let Some(hours) = units.iter().find_map(hours) {
+                Reading::Available((hours * 3600.0) as u64)
             } else {
                 Reading::unavailable("rate not reported")
             };
+        let health = units
+            .iter()
+            .find_map(|u| Some(u.full? / u.design.filter(|v| *v > 0.0)? * 100.0));
         Reading::Available(BatteryStats {
             name: dir
                 .file_name()
@@ -105,9 +123,8 @@ impl Source for Battery {
                 .map(Reading::Available)
                 .unwrap_or_else(|| Reading::unavailable("rate not reported")),
             time_remaining_secs,
-            health_percent: full
-                .zip(design.filter(|v| *v > 0.0))
-                .map(|(f, d)| Reading::Available(f / d * 100.0))
+            health_percent: health
+                .map(Reading::Available)
                 .unwrap_or_else(|| Reading::unavailable("design capacity not reported")),
             charge_limit_percent: number(dir.join("charge_control_end_threshold")),
             cycle_count: number::<u64>(dir.join("cycle_count")).filter(|v| *v > 0),
@@ -177,16 +194,64 @@ mod tests {
         ]);
         assert!(Battery::new(t.path().into()).sample().reason().is_some());
     }
+    /// A regular file where the class directory belongs fails to list with
+    /// NotADirectory for every user, privileged or not, which is the same
+    /// "exists but cannot be listed" case as a permission error.
     #[test]
     fn unreadable_power_supply_list_is_not_no_battery() {
-        use std::os::unix::fs::PermissionsExt;
         let t = tempfile::tempdir().unwrap();
-        let dir = t.path().join("sys/class/power_supply");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+        std::fs::create_dir_all(t.path().join("sys/class")).unwrap();
+        std::fs::write(t.path().join("sys/class/power_supply"), "").unwrap();
         let r = Battery::new(t.path().into()).sample();
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(r.reason(), Some("power supply list not readable"));
+    }
+    #[test]
+    fn a_supply_whose_type_cannot_be_read_keeps_ac_unknown() {
+        let t = tree(&[("status", "Unknown"), ("capacity", "8")]);
+        let put = super::super::sensors::tests::put;
+        put(t.path(), "sys/class/power_supply/AC0/type", "Mains");
+        put(t.path(), "sys/class/power_supply/AC0/online", "0");
+        // AC1 exists but its type cannot be read.
+        put(t.path(), "sys/class/power_supply/AC1/online", "1");
+        let b = Battery::new(t.path().into()).sample();
+        assert_eq!(b.value().unwrap().ac_online, None);
+        // A known online mains supply is still online.
+        put(t.path(), "sys/class/power_supply/AC0/online", "1");
+        let b = Battery::new(t.path().into()).sample();
+        assert_eq!(b.value().unwrap().ac_online, Some(true));
+    }
+    /// Each figure uses one complete pair in one unit: energy, else charge.
+    #[test]
+    fn each_figure_uses_a_complete_energy_or_charge_pair() {
+        // energy_now alone, with a complete charge pair: percent and health
+        // come from charge.
+        let t = tree(&[
+            ("status", "Unknown"),
+            ("energy_now", "30000000"),
+            ("charge_now", "2000000"),
+            ("charge_full", "4000000"),
+            ("charge_full_design", "5000000"),
+        ]);
+        let reading = Battery::new(t.path().into()).sample();
+        let b = reading.value().unwrap();
+        assert_eq!(b.percent, 50.0);
+        assert_eq!(b.health_percent, Reading::Available(80.0));
+        // Charging with energy_now and power but no energy_full: the time to
+        // full comes from the complete charge pair and current.
+        let t = tree(&[
+            ("status", "Charging"),
+            ("capacity", "50"),
+            ("energy_now", "30000000"),
+            ("power_now", "15000000"),
+            ("charge_now", "2000000"),
+            ("charge_full", "4000000"),
+            ("current_now", "1000000"),
+        ]);
+        let reading = Battery::new(t.path().into()).sample();
+        assert_eq!(
+            reading.value().unwrap().time_remaining_secs,
+            Reading::Available(7200)
+        );
     }
     #[test]
     fn an_unreadable_mains_supply_makes_ac_unknown_not_offline() {

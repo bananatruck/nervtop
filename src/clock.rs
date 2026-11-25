@@ -43,11 +43,41 @@ mod tests {
         assert_eq!(hms(ms, 5 * 3600 + 1800), "13:25:00");
     }
 
+    /// Set in a child test process to the offset it must report.
+    const EXPECTED: &str = "NERVTOP_CLOCK_EXPECTED_OFFSET";
+
+    /// The offset follows `TZ` exactly, including zones beyond the real-world
+    /// 14 h that glibc accepts. Each zone is checked in a child process with
+    /// its own `TZ`, so neither the inherited `TZ` nor a change to it can
+    /// affect other tests running in parallel.
     #[test]
-    fn offset_is_within_a_day() {
-        let off = local_offset_secs(1_795_420_500).expect("libc reports an offset");
-        // glibc accepts TZ offsets beyond the real-world 14 h (TZ=ABC-15),
-        // so only the C library's own limit is a safe bound here.
-        assert!(off.abs() < 25 * 3600, "{off}");
+    fn offset_follows_the_time_zone() {
+        // 2026-11-18T07:55:00Z: outside daylight saving time in the zones
+        // below, and inside the rule of the last one.
+        let at = 1_795_420_500;
+        if let Ok(expected) = std::env::var(EXPECTED) {
+            assert_eq!(local_offset_secs(at), Some(expected.parse().unwrap()));
+            return;
+        }
+        for (tz, expected) in [
+            ("UTC0", 0),
+            ("EST5", -5 * 3600),
+            ("IST-5:30", 5 * 3600 + 1800),
+            ("ABC-15", 15 * 3600),
+            ("STD-24:30DST,M1.1.0,M12.5.0", 25 * 3600 + 1800),
+        ] {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "clock::tests::offset_follows_the_time_zone",
+                    "--quiet",
+                ])
+                .env("TZ", tz)
+                .env(EXPECTED, expected.to_string())
+                .stdout(std::process::Stdio::null())
+                .status()
+                .unwrap();
+            assert!(status.success(), "TZ={tz}: expected offset {expected}");
+        }
     }
 }

@@ -219,7 +219,8 @@ When something cannot be read, nervtop shows `unavailable` and the reason, never
 | Data | Source |
 | --- | --- |
 | CPU usage | `/proc/stat` counter deltas |
-| Load, CPU frequency and model, processes, users | [`sysinfo`](https://crates.io/crates/sysinfo) |
+| Load, CPU model, processes, users | [`sysinfo`](https://crates.io/crates/sysinfo) |
+| CPU frequency | `scaling_cur_freq` per online CPU, else that CPU's `cpu MHz` or `clock` in `/proc/cpuinfo` |
 | Memory and swap | `/proc/meminfo`, with current-read failure detection |
 | Disk space | `/proc/self/mountinfo` filtered to visible block-device mounts (by mount and parent IDs), then `statvfs(3)`, one entry per device; network and FUSE mounts, and local mounts hidden under them, are never queried, so a hung server cannot freeze nervtop |
 | Disk read and write rates | `/proc/diskstats` |

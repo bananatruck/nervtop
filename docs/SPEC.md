@@ -41,6 +41,8 @@ The selection is kept on the same PID across refreshes when that process still e
 ### 3 DIAGNOSTICS
 
 Every temperature sensor and fan, every GPU field, the full battery record, every disk and interface, the alert rule table with current values and thresholds, and the alert event log with timestamps.
+Each direction of a disk or interface rate is shown on its own, so one unavailable direction does not hide the other.
+Rule values are never clipped; on a narrow table the thresholds columns are left out first, then the label column.
 Use `j`, `k`, or the arrow keys to scroll the diagnostics tables together.
 Each shorter table stops at its last page.
 `PgUp` and `PgDn` move by a page, the number of data rows the smallest scrolling table shows, so no table skips a row; `g` and `G` go to the first and last rows.

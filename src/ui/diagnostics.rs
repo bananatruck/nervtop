@@ -766,52 +766,87 @@ fn draw_rules_table(frame: &mut Frame, area: Rect, app: &App) {
     let muted = Style::default().fg(p.muted);
     let unknown = Style::default().fg(p.unknown);
 
-    // Other 5 columns take 10 + 6 + 4 + 4 + 8 + 5 spaces = 37 columns; the
-    // rule column gets the rest. Each row fits on its own, so one long
-    // subject (a GPU name) never hides the subjects of the other rows.
-    let rule_w = (inner.width as usize).saturating_sub(37);
-
-    let rows: Vec<Row<'static>> = rules_slice
+    // VALUE is as wide as its widest value ("unavailable", "0.09/core"),
+    // so a reading is never clipped. When the table is too narrow for every
+    // column, WARN and CRIT go first and then LABEL; RULE keeps at least
+    // 12 cells. Each row fits its rule name on its own, so one long subject
+    // (a GPU name) never hides the subjects of the other rows.
+    let values: Vec<Span<'static>> = rules_slice
         .iter()
-        .map(|r| {
-            let key_subj = fit_rule_name(r.rule.key(), &r.subject, rule_w);
-            let val_span = match r.value {
-                Some(v) => Span::styled(format_rule_value(r.rule, v), text_style),
-                None => {
-                    let reason = r.note.as_deref().unwrap_or("no data");
-                    Span::styled(fmt::unavailable_str(reason, 11), unknown)
-                }
-            };
-            let lvl_color = fmt::level_color(p, r.level);
-            Row::new(vec![
-                Cell::from(Span::styled(key_subj, text_style)),
-                Cell::from(Span::styled(r.rule.label(), muted)),
-                Cell::from(val_span),
-                Cell::from(Span::styled(format!("{:.1}", r.warn), muted)),
-                Cell::from(Span::styled(format!("{:.1}", r.crit), muted)),
-                Cell::from(Span::styled(
-                    r.level.label(),
-                    Style::default().fg(lvl_color).add_modifier(Modifier::BOLD),
-                )),
-            ])
+        .map(|r| match r.value {
+            Some(v) => Span::styled(format_rule_value(r.rule, v), text_style),
+            None => {
+                let reason = r.note.as_deref().unwrap_or("no data");
+                Span::styled(fmt::unavailable_str(reason, 11), unknown)
+            }
         })
         .collect();
-
-    let max_level_len = rules_slice
+    let value_w = values
+        .iter()
+        .map(|v| fmt::display_width(&v.content))
+        .max()
+        .unwrap_or(0)
+        .max("VALUE".len());
+    let level_w = rules_slice
         .iter()
         .map(|r| r.level.label().len())
         .max()
         .unwrap_or(7)
-        .max(5) as u16;
+        .max("LEVEL".len());
+    // Cells after RULE, each with the space before it.
+    let after_rule = |label: bool, limits: bool| {
+        (value_w + 1) + (level_w + 1) + if label { 11 } else { 0 } + if limits { 10 } else { 0 }
+    };
+    let width = inner.width as usize;
+    let fits = |label: bool, limits: bool| 12 + after_rule(label, limits) <= width;
+    let (show_label, show_limits) = if fits(true, true) {
+        (true, true)
+    } else if fits(true, false) {
+        (true, false)
+    } else {
+        (false, false)
+    };
+    let rule_w = width.saturating_sub(after_rule(show_label, show_limits));
 
-    let widths = [
-        Constraint::Min(12),
-        Constraint::Length(10),
-        Constraint::Length(6),
-        Constraint::Length(4),
-        Constraint::Length(4),
-        Constraint::Length(max_level_len),
-    ];
+    let rows: Vec<Row<'static>> = rules_slice
+        .iter()
+        .zip(values)
+        .map(|(r, value)| {
+            let lvl_color = fmt::level_color(p, r.level);
+            let mut cells = vec![Cell::from(Span::styled(
+                fit_rule_name(r.rule.key(), &r.subject, rule_w),
+                text_style,
+            ))];
+            if show_label {
+                cells.push(Cell::from(Span::styled(r.rule.label(), muted)));
+            }
+            cells.push(Cell::from(value));
+            if show_limits {
+                cells.push(Cell::from(Span::styled(format!("{:.1}", r.warn), muted)));
+                cells.push(Cell::from(Span::styled(format!("{:.1}", r.crit), muted)));
+            }
+            cells.push(Cell::from(Span::styled(
+                r.level.label(),
+                Style::default().fg(lvl_color).add_modifier(Modifier::BOLD),
+            )));
+            Row::new(cells)
+        })
+        .collect();
+
+    let mut widths = vec![Constraint::Min(12)];
+    let mut header = vec!["RULE"];
+    if show_label {
+        widths.push(Constraint::Length(10));
+        header.push("LABEL");
+    }
+    widths.push(Constraint::Length(value_w as u16));
+    header.push("VALUE");
+    if show_limits {
+        widths.extend([Constraint::Length(4), Constraint::Length(4)]);
+        header.extend(["WARN", "CRIT"]);
+    }
+    widths.push(Constraint::Length(level_w as u16));
+    header.push("LEVEL");
 
     let mut table = Table::new(
         visible_rows(
@@ -825,8 +860,7 @@ fn draw_rules_table(frame: &mut Frame, area: Rect, app: &App) {
     .column_spacing(1);
     if inner.height as usize > rules_slice.len() {
         table = table.header(
-            Row::new(vec!["RULE", "LABEL", "VALUE", "WARN", "CRIT", "LEVEL"])
-                .style(Style::default().fg(p.heading).add_modifier(Modifier::BOLD)),
+            Row::new(header).style(Style::default().fg(p.heading).add_modifier(Modifier::BOLD)),
         );
     }
     frame.render_widget(table, inner);
@@ -995,6 +1029,40 @@ mod tests {
             "capacity column lost: {row:?}"
         );
     }
+    /// A rule's value is never clipped: VALUE is as wide as its widest
+    /// value, and a narrow table drops optional columns instead.
+    #[test]
+    fn rule_values_are_shown_whole() {
+        use crate::alert::RuleId;
+        let mut app = nominal_app();
+        app.screen = Screen::Diagnostics;
+        let load = app
+            .rules
+            .iter_mut()
+            .find(|r| r.rule == RuleId::Load)
+            .unwrap();
+        load.value = Some(0.09);
+        load.subject = "loadprobe".into();
+        let missing = app
+            .rules
+            .iter_mut()
+            .find(|r| r.rule == RuleId::Memory)
+            .unwrap();
+        missing.value = None;
+        missing.subject = "memprobe".into();
+        for (width, height) in [(200, 60), (120, 40), (80, 24)] {
+            let lines = buffer_lines(&render(&app, width, height));
+            for (subject, value) in [("loadprobe", "0.09/core"), ("memprobe", "unavailable")] {
+                if let Some(row) = lines.iter().find(|l| l.contains(subject)) {
+                    assert!(row.contains(value), "{width}x{height}: {row:?}");
+                }
+            }
+        }
+        // At the widest size both rows are on screen.
+        let wide = buffer_lines(&render(&app, 200, 60)).join("\n");
+        assert!(wide.contains("loadprobe") && wide.contains("memprobe"));
+    }
+
     /// One unavailable direction does not hide the other's reading.
     #[test]
     fn each_available_io_direction_stays_visible() {

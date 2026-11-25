@@ -568,12 +568,10 @@ fn disk_subjects_sorted_and_removed() {
         vec!["/", "/z"]
     );
     s.disks = Reading::Available(vec![]);
-    assert!(
-        !e.evaluate(&s, &instant())
-            .events
-            .iter()
-            .any(|e| e.rule == RuleId::Disk)
-    );
+    let emptied = e.evaluate(&s, &instant());
+    // The disk rules are removed, not kept silently.
+    assert!(!emptied.rules.iter().any(|r| r.rule == RuleId::Disk));
+    assert!(!emptied.events.iter().any(|e| e.rule == RuleId::Disk));
 }
 #[test]
 fn hottest_sensor() {

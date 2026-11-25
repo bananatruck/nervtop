@@ -47,56 +47,157 @@ fn statvfs_space(path: &Path) -> Option<(u64, u64)> {
     ))
 }
 
-/// Decodes the octal escapes `/proc/self/mounts` uses for spaces, tabs,
-/// newlines and backslashes in paths.
-fn unescape_mount(field: &str) -> String {
-    let bytes = field.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
+/// Decodes the octal escapes the kernel uses for spaces, tabs, newlines and
+/// backslashes in mount table paths. The result stays as bytes: a mount point
+/// need not be valid UTF-8.
+fn unescape_mount(field: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(field.len());
     let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'\\'
-            && i + 3 < bytes.len()
-            && bytes[i + 1..i + 4]
+    while i < field.len() {
+        if field[i] == b'\\'
+            && i + 3 < field.len()
+            && field[i + 1..i + 4]
                 .iter()
                 .all(|b| (b'0'..=b'7').contains(b))
         {
-            let v = (bytes[i + 1] - b'0') as u32 * 64
-                + (bytes[i + 2] - b'0') as u32 * 8
-                + (bytes[i + 3] - b'0') as u32;
+            let v = (field[i + 1] - b'0') as u32 * 64
+                + (field[i + 2] - b'0') as u32 * 8
+                + (field[i + 3] - b'0') as u32;
             if let Ok(b) = u8::try_from(v) {
                 out.push(b);
                 i += 4;
                 continue;
             }
         }
-        out.push(bytes[i]);
+        out.push(field[i]);
         i += 1;
     }
-    String::from_utf8_lossy(&out).into_owned()
+    out
 }
 
-/// `(device, mount point, filesystem type)` for each visible mount in a
-/// mounts table. Fields are separated by ASCII spaces and tabs only, so a
-/// no-break space inside a path survives; a record that is not valid UTF-8 is
-/// skipped on its own; and a mount covered by a later mount at the same path
-/// is dropped, because querying that path would reach the covering one.
-fn parse_mounts(table: &[u8]) -> Vec<(String, String, String)> {
-    let records: Vec<(String, String, String)> = table
+/// A mount point for display: valid UTF-8 as is, other bytes as `\xNN`.
+fn display_path(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len());
+    for chunk in bytes.utf8_chunks() {
+        out.push_str(chunk.valid());
+        for b in chunk.invalid() {
+            out.push_str(&format!("\\x{b:02x}"));
+        }
+    }
+    out
+}
+
+fn as_path(bytes: &[u8]) -> &Path {
+    use std::os::unix::ffi::OsStrExt;
+    Path::new(std::ffi::OsStr::from_bytes(bytes))
+}
+
+/// One record of `/proc/self/mountinfo`, as proc_pid_mountinfo(5) describes:
+/// `ID PARENT MAJ:MIN ROOT MOUNT-POINT OPTIONS [OPTIONAL...] - TYPE SOURCE SUPER-OPTIONS`.
+#[derive(Debug, Clone, PartialEq)]
+struct Mount {
+    id: u64,
+    parent: u64,
+    point: Vec<u8>,
+    fs: String,
+    source: Vec<u8>,
+}
+
+/// Parses a mountinfo table. Fields are separated by ASCII spaces and tabs
+/// only, so a no-break space inside a path survives; a malformed record is
+/// skipped on its own.
+fn parse_mountinfo(table: &[u8]) -> Vec<Mount> {
+    table
         .split(|b| *b == b'\n')
-        .filter_map(|line| std::str::from_utf8(line).ok())
         .filter_map(|line| {
-            let mut f = line.split([' ', '\t']).filter(|x| !x.is_empty());
-            let device = unescape_mount(f.next()?);
-            let mount = unescape_mount(f.next()?);
-            let fs = f.next()?.to_owned();
-            Some((device, mount, fs))
+            let f: Vec<&[u8]> = line
+                .split(|b| *b == b' ' || *b == b'\t')
+                .filter(|x| !x.is_empty())
+                .collect();
+            let number = |x: &[u8]| std::str::from_utf8(x).ok()?.parse::<u64>().ok();
+            // The optional fields end at a lone "-", after the six fixed fields.
+            let dash = 6 + f.get(6..)?.iter().position(|x| *x == b"-")?;
+            Some(Mount {
+                id: number(f.first()?)?,
+                parent: number(f.get(1)?)?,
+                point: unescape_mount(f.get(4)?),
+                fs: String::from_utf8(unescape_mount(f.get(dash + 1)?)).ok()?,
+                source: unescape_mount(f.get(dash + 2)?),
+            })
         })
-        .collect();
-    records
-        .iter()
-        .enumerate()
-        .filter(|(i, (_, mount, _))| !records[i + 1..].iter().any(|(_, m, _)| m == mount))
-        .map(|(_, r)| r.clone())
+        .collect()
+}
+
+/// The mounts that path lookup reaches at their own mount point, in table
+/// order, decided from the mount tree rather than from paths alone.
+///
+/// `reach(i)` holds when looking up mount i's mount point lands on the stack
+/// of mounts at that path that contains i:
+/// - a root mount (its parent is outside the table) is reached;
+/// - a mount on top of its parent at the same path is reached when the
+///   parent is;
+/// - otherwise the mount sits on a directory inside its parent, and is
+///   reached only when the parent is visible, no other mount on that parent
+///   covers one of its ancestor directories, and no later mount on that
+///   parent has the same path.
+///
+/// A mount is visible when it is reached and nothing sits on it (no child at
+/// the same path). So when NFS covers an ext4 `/data`, an ext4 mount at
+/// `/data/local` that sat on the old `/data` is hidden: querying its path
+/// would reach NFS. A parent cycle in a malformed table hides its mounts.
+fn visible(mounts: &[Mount]) -> Vec<&Mount> {
+    let index: std::collections::HashMap<u64, usize> =
+        mounts.iter().enumerate().map(|(i, m)| (m.id, i)).collect();
+    let parent_of = |i: usize| index.get(&mounts[i].parent).copied().filter(|&p| p != i);
+    let covered = |i: usize| {
+        mounts
+            .iter()
+            .any(|c| c.id != mounts[i].id && c.parent == mounts[i].id && c.point == mounts[i].point)
+    };
+    #[derive(Clone, Copy, PartialEq)]
+    enum State {
+        New,
+        Visiting,
+        Done(bool),
+    }
+    fn reach(
+        i: usize,
+        mounts: &[Mount],
+        parent_of: &dyn Fn(usize) -> Option<usize>,
+        covered: &dyn Fn(usize) -> bool,
+        state: &mut [State],
+    ) -> bool {
+        match state[i] {
+            State::Done(r) => return r,
+            State::Visiting => return false,
+            State::New => {}
+        }
+        state[i] = State::Visiting;
+        let m = &mounts[i];
+        let r = match parent_of(i) {
+            None => true,
+            Some(p) if mounts[p].point == m.point => reach(p, mounts, parent_of, covered, state),
+            Some(p) => {
+                let point = as_path(&m.point);
+                let hidden_by_sibling = mounts.iter().enumerate().any(|(j, s)| {
+                    j != i
+                        && s.parent == mounts[p].id
+                        && if s.point == m.point {
+                            j > i
+                        } else {
+                            point.starts_with(as_path(&s.point))
+                        }
+                });
+                !hidden_by_sibling && !covered(p) && reach(p, mounts, parent_of, covered, state)
+            }
+        };
+        state[i] = State::Done(r);
+        r
+    }
+    let mut state = vec![State::New; mounts.len()];
+    (0..mounts.len())
+        .filter(|&i| reach(i, mounts, &parent_of, &covered, &mut state) && !covered(i))
+        .map(|i| &mounts[i])
         .collect()
 }
 
@@ -124,37 +225,29 @@ fn device_name(root: &Path, device: &Path) -> Option<String> {
 impl Source for Disks {
     type Output = Vec<DiskStats>;
     fn sample(&mut self) -> Reading<Self::Output> {
-        let Ok(mounts) = std::fs::read(self.root.join("proc/self/mounts")) else {
+        let Ok(table) = std::fs::read(self.root.join("proc/self/mountinfo")) else {
             return Reading::unavailable("mount table not readable");
         };
         let counters = read(self.root.join("proc/diskstats"));
         let rates = self
             .rates
             .sample(counters.as_deref().map(parse_diskstats).unwrap_or_default());
-        // Filter and deduplicate before asking for space: statvfs on a FUSE or
-        // network mount whose server has gone away can block indefinitely, so
-        // only block-device mounts are ever queried.
-        let mut chosen: BTreeMap<String, (String, String)> = BTreeMap::new();
-        for (dev, mount_point, fs) in parse_mounts(&mounts) {
-            let path = Path::new(&dev);
+        // Filter before asking for space: statvfs on a FUSE or network mount
+        // whose server has gone away can block indefinitely, so only visible
+        // block-device mounts are ever queried.
+        let mounts = parse_mountinfo(&table);
+        let mut chosen: BTreeMap<String, Vec<&Mount>> = BTreeMap::new();
+        for mount in visible(&mounts) {
+            let path = as_path(&mount.source);
             // FUSE filesystems (fuseblk, fuse.*) can hang in statvfs when
             // their daemon stops, even when backed by a block device.
-            if !path.starts_with("/dev") || fs.starts_with("fuse") {
+            if !path.starts_with("/dev") || mount.fs.starts_with("fuse") {
                 continue;
             }
             let Some(device) = device_name(&self.root, path) else {
                 continue;
             };
-            // Btrfs subvolumes share filesystem capacity; keep one pool per device.
-            // Linux btrfs_statfs uses fs_info for capacity, not the subvolume:
-            // https://github.com/torvalds/linux/blob/v6.12/fs/btrfs/super.c#L1631-L1726
-            if chosen
-                .get(&device)
-                .is_some_and(|(m, _)| m.len() <= mount_point.len())
-            {
-                continue;
-            }
-            chosen.insert(device, (mount_point, fs));
+            chosen.entry(device).or_default().push(mount);
         }
         let missing = if counters.is_none() {
             "diskstats not readable"
@@ -162,8 +255,17 @@ impl Source for Disks {
             "device counters not reported"
         };
         let mut out: Vec<DiskStats> = Vec::new();
-        for (device, (mount_point, file_system)) in chosen {
-            let Some((total_bytes, available_bytes)) = (self.space)(Path::new(&mount_point)) else {
+        for (device, mut candidates) in chosen {
+            // Btrfs subvolumes share filesystem capacity; keep one pool per device.
+            // Linux btrfs_statfs uses fs_info for capacity, not the subvolume:
+            // https://github.com/torvalds/linux/blob/v6.12/fs/btrfs/super.c#L1631-L1726
+            // The shortest mount point is tried first; a longer one is the
+            // fallback when that path cannot be queried.
+            candidates.sort_by_key(|m| m.point.len());
+            let Some((mount, (total_bytes, available_bytes))) = candidates
+                .into_iter()
+                .find_map(|m| (self.space)(as_path(&m.point)).map(|space| (m, space)))
+            else {
                 continue;
             };
             let (read_bps, write_bps) = rates
@@ -171,9 +273,9 @@ impl Source for Disks {
                 .cloned()
                 .unwrap_or_else(|| (Reading::unavailable(missing), Reading::unavailable(missing)));
             out.push(DiskStats {
-                mount_point,
+                mount_point: display_path(&mount.point),
                 device,
-                file_system,
+                file_system: mount.fs.clone(),
                 total_bytes,
                 available_bytes,
                 read_bps,
@@ -187,44 +289,172 @@ impl Source for Disks {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn queried(mounts: &[u8]) -> Vec<PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+
+    /// Samples a tree whose mountinfo is `table`, answering statvfs with
+    /// `space`, and returns the paths queried and the disks reported.
+    fn sampled(
+        table: &[u8],
+        space: impl Fn(&Path) -> Option<(u64, u64)> + Send + 'static,
+    ) -> (Vec<PathBuf>, Vec<DiskStats>) {
         let tree = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tree.path().join("proc/self")).unwrap();
-        std::fs::write(tree.path().join("proc/self/mounts"), mounts).unwrap();
+        std::fs::write(tree.path().join("proc/self/mountinfo"), table).unwrap();
         let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let log = asked.clone();
         let mut d = Disks::with_space(tree.path().into(), move |p: &Path| {
             log.lock().unwrap().push(p.to_path_buf());
-            Some((1000, 250))
+            space(p)
         });
-        d.sample();
-        asked.lock().unwrap().clone()
+        let disks = d.sample().value().cloned().unwrap();
+        let asked = asked.lock().unwrap().clone();
+        (asked, disks)
+    }
+
+    fn queried(table: &[u8]) -> Vec<PathBuf> {
+        sampled(table, |_| Some((1000, 250))).0
+    }
+
+    fn paths(list: &[&str]) -> Vec<PathBuf> {
+        list.iter().map(PathBuf::from).collect()
     }
 
     #[test]
     fn fuse_filesystems_on_block_devices_are_not_queried() {
-        let asked = queried(b"/dev/sdb1 /mnt/win fuseblk rw 0 0\n/dev/sda1 / ext4 rw 0 0\n");
-        assert_eq!(asked, vec![PathBuf::from("/")]);
+        let asked = queried(
+            b"1 0 8:1 / / rw - ext4 /dev/sda1 rw\n2 1 8:17 / /mnt/win rw - fuseblk /dev/sdb1 rw\n",
+        );
+        assert_eq!(asked, paths(&["/"]));
     }
 
     #[test]
     fn a_mount_hidden_under_a_later_mount_is_not_queried() {
         let asked = queried(
-            b"/dev/sda1 / ext4 rw 0 0\n/dev/sdb1 /data ext4 rw 0 0\nserver:/x /data nfs4 rw 0 0\n",
+            b"1 0 8:1 / / rw - ext4 /dev/sda1 rw\n\
+              2 1 8:17 / /data rw - ext4 /dev/sdb1 rw\n\
+              3 2 0:50 / /data rw - nfs4 server:/x rw\n",
         );
-        assert_eq!(asked, vec![PathBuf::from("/")]);
+        assert_eq!(asked, paths(&["/"]));
+    }
+
+    /// NFS mounted over `/data` hides the ext4 mount below it and every mount
+    /// that sat on that ext4 mount, such as `/data/local`; a local mount made
+    /// on top of the NFS mount afterwards is visible.
+    #[test]
+    fn mounts_under_an_overmounted_ancestor_are_not_queried() {
+        let asked = queried(
+            b"1 0 8:1 / / rw - ext4 /dev/sda1 rw\n\
+              2 1 8:17 / /data rw - ext4 /dev/sdb1 rw\n\
+              3 2 8:33 / /data/local rw - ext4 /dev/sdc1 rw\n\
+              4 2 0:50 / /data rw - nfs4 server:/x rw\n\
+              5 4 8:49 / /data/later rw - ext4 /dev/sdd1 rw\n",
+        );
+        assert_eq!(asked, paths(&["/", "/data/later"]));
+    }
+
+    /// Which mounts are visible, by mount and parent IDs, for each way one
+    /// mount can hide another.
+    #[test]
+    fn visibility_follows_the_mount_tree() {
+        for (table, expected) in [
+            // A stack of three mounts at one path: only the top is visible.
+            (
+                "1 0 8:1 / / rw - ext4 /dev/sda1 rw\n2 1 8:2 / /a rw - ext4 /dev/sdb rw\n3 2 8:3 / /a rw - ext4 /dev/sdc rw\n4 3 8:4 / /a rw - ext4 /dev/sdd rw\n",
+                &["/", "/a"][..],
+            ),
+            // A child of a mount in the middle of a stack is hidden.
+            (
+                "1 0 8:1 / / rw - ext4 /dev/sda1 rw\n2 1 8:2 / /a rw - ext4 /dev/sdb rw\n3 2 8:3 / /a rw - ext4 /dev/sdc rw\n5 3 8:5 / /a/b rw - ext4 /dev/sde rw\n4 3 8:4 / /a rw - ext4 /dev/sdd rw\n",
+                &["/", "/a"],
+            ),
+            // A sibling mounted on an ancestor directory hides a deeper mount
+            // made on the same parent earlier.
+            (
+                "1 0 8:1 / / rw - ext4 /dev/sda1 rw\n3 1 8:3 / /data/local rw - ext4 /dev/sdc rw\n2 1 8:2 / /data rw - ext4 /dev/sdb rw\n",
+                &["/", "/data"],
+            ),
+            // A path that only shares a prefix is not an ancestor.
+            (
+                "1 0 8:1 / / rw - ext4 /dev/sda1 rw\n2 1 8:2 / /data rw - ext4 /dev/sdb rw\n3 1 8:3 / /database rw - ext4 /dev/sdc rw\n",
+                &["/", "/data", "/database"],
+            ),
+            // An overmounted root hides everything mounted on the old root.
+            (
+                "1 0 8:1 / / rw - ext4 /dev/sda1 rw\n2 1 8:2 / /home rw - ext4 /dev/sdb rw\n3 1 8:3 / / rw - ext4 /dev/sdc rw\n",
+                &["/"],
+            ),
+            // A parent cycle in a malformed table hides its mounts.
+            (
+                "1 0 8:1 / / rw - ext4 /dev/sda1 rw\n7 8 8:7 / /x rw - ext4 /dev/sdx rw\n8 7 8:8 / /y rw - ext4 /dev/sdy rw\n",
+                &["/"],
+            ),
+        ] {
+            let mounts = parse_mountinfo(table.as_bytes());
+            let seen: Vec<&str> = visible(&mounts)
+                .iter()
+                .map(|m| std::str::from_utf8(&m.point).unwrap())
+                .collect();
+            assert_eq!(seen, expected, "{table}");
+        }
+    }
+
+    #[test]
+    fn mountinfo_fields_follow_the_separator_after_optional_fields() {
+        let mounts = parse_mountinfo(
+            b"36 35 98:0 /mnt1 /mnt/My\\040Drive rw,noatime master:1 shared:2 - ext3 /dev/root rw,errors=continue\n\
+              37 35 98:0 / /broken rw no-separator ext3 /dev/x rw\n",
+        );
+        assert_eq!(
+            mounts,
+            vec![Mount {
+                id: 36,
+                parent: 35,
+                point: b"/mnt/My Drive".to_vec(),
+                fs: "ext3".into(),
+                source: b"/dev/root".to_vec(),
+            }]
+        );
     }
 
     #[test]
     fn only_ascii_whitespace_separates_mount_fields() {
-        let asked = queried("/dev/sda1 /mnt/a\u{a0}b ext4 rw 0 0\n".as_bytes());
-        assert_eq!(asked, vec![PathBuf::from("/mnt/a\u{a0}b")]);
+        let asked = queried("1 0 8:1 / /mnt/a\u{a0}b rw - ext4 /dev/sda1 rw\n".as_bytes());
+        assert_eq!(asked, paths(&["/mnt/a\u{a0}b"]));
     }
 
+    /// A mount point that is not valid UTF-8 is queried by its bytes and
+    /// shown with the undecodable bytes escaped, so the disk is not lost.
     #[test]
-    fn one_undecodable_record_does_not_lose_the_others() {
-        let asked = queried(b"/dev/sda1 / ext4 rw 0 0\n/dev/sdb1 /mnt/\xff ext4 rw 0 0\n");
-        assert_eq!(asked, vec![PathBuf::from("/")]);
+    fn a_mount_point_that_is_not_utf8_is_queried_and_shown_escaped() {
+        let (asked, disks) = sampled(
+            b"1 0 8:1 / / rw - ext4 /dev/sda1 rw\n2 1 8:17 / /mnt/\xff rw - ext4 /dev/sdb1 rw\n",
+            |_| Some((1000, 250)),
+        );
+        assert_eq!(
+            asked,
+            vec![
+                PathBuf::from("/"),
+                PathBuf::from(std::ffi::OsStr::from_bytes(b"/mnt/\xff"))
+            ]
+        );
+        let shown: Vec<&str> = disks.iter().map(|d| d.mount_point.as_str()).collect();
+        assert_eq!(shown, ["/", "/mnt/\\xff"]);
+    }
+
+    /// When the preferred (shortest) mount point of a device cannot be
+    /// queried, a longer one for the same device is tried, and the device
+    /// still gets one row.
+    #[test]
+    fn a_device_falls_back_to_another_mount_point() {
+        let (asked, disks) = sampled(
+            b"1 0 0:30 /@ / rw - btrfs /dev/nvme0n1p2 rw\n\
+              2 1 0:30 /@home /home rw - btrfs /dev/nvme0n1p2 rw\n",
+            |p| (p != Path::new("/")).then_some((1000, 250)),
+        );
+        assert_eq!(asked, paths(&["/", "/home"]));
+        assert_eq!(disks.len(), 1);
+        assert_eq!(disks[0].mount_point, "/home");
+        assert_eq!(disks[0].device, "nvme0n1p2");
     }
 
     #[test]
@@ -234,13 +464,13 @@ mod tests {
         std::fs::create_dir_all(tree.path().join("dev")).unwrap();
         std::fs::write(tree.path().join("dev/nvme0n1p2"), "").unwrap();
         std::fs::write(
-            tree.path().join("proc/self/mounts"),
-            "/dev/nvme0n1p2 / btrfs rw,subvol=/@ 0 0\n\
-             /dev/nvme0n1p2 /home btrfs rw,subvol=/@home 0 0\n\
-             proc /proc proc rw 0 0\n\
-             alice@host:/srv /home/alice/remote fuse.sshfs rw 0 0\n\
-             server:/export /mnt/nfs nfs4 rw 0 0\n\
-             /dev/sdb1 /mnt/My\\040Drive ext4 rw 0 0\n",
+            tree.path().join("proc/self/mountinfo"),
+            "1 0 0:30 /@ / rw - btrfs /dev/nvme0n1p2 rw,subvol=/@\n\
+             2 1 0:30 /@home /home rw - btrfs /dev/nvme0n1p2 rw,subvol=/@home\n\
+             3 1 0:5 / /proc rw - proc proc rw\n\
+             4 2 0:60 / /home/alice/remote rw - fuse.sshfs alice@host:/srv rw\n\
+             5 1 0:61 / /mnt/nfs rw - nfs4 server:/export rw\n\
+             6 1 8:17 / /mnt/My\\040Drive rw - ext4 /dev/sdb1 rw\n",
         )
         .unwrap();
         let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));

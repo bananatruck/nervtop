@@ -221,7 +221,7 @@ When something cannot be read, nervtop shows `unavailable` and the reason, never
 | CPU usage | `/proc/stat` counter deltas |
 | Load, CPU frequency and model, processes, users | [`sysinfo`](https://crates.io/crates/sysinfo) |
 | Memory and swap | `/proc/meminfo`, with current-read failure detection |
-| Disk space | `/proc/self/mounts` filtered to block devices, then `statvfs(3)`, one entry per device; network and FUSE mounts are never queried, so a hung server cannot freeze nervtop |
+| Disk space | `/proc/self/mountinfo` filtered to visible block-device mounts (by mount and parent IDs), then `statvfs(3)`, one entry per device; network and FUSE mounts, and local mounts hidden under them, are never queried, so a hung server cannot freeze nervtop |
 | Disk read and write rates | `/proc/diskstats` |
 | Network rates and totals | `/sys/class/net` interface indices and byte counters; raw names stay distinct, loopback and never-used interfaces hidden |
 | Temperatures and fans | `/sys/class/hwmon` |

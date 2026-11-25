@@ -239,7 +239,12 @@ impl App {
     /// Processes after the kernel-thread setting and the name filter, in the
     /// current sort order. Ties break by PID so the order is stable.
     pub fn visible_processes(&self) -> Vec<&ProcessInfo> {
-        let Some(list) = self.snapshot.as_ref().and_then(|s| s.processes.value()) else {
+        self.visible_in(self.snapshot.as_ref())
+    }
+
+    /// The processes of `snapshot` as `visible_processes` lists them.
+    fn visible_in<'a>(&self, snapshot: Option<&'a Snapshot>) -> Vec<&'a ProcessInfo> {
+        let Some(list) = snapshot.and_then(|s| s.processes.value()) else {
             return Vec::new();
         };
         let needle = self.procs.filter.to_lowercase();
@@ -305,7 +310,6 @@ pub enum Effect {
 
 impl App {
     pub fn apply_snapshot(&mut self, s: Snapshot) {
-        let old_index = self.selected_index();
         let eval = self.engine.evaluate(&s, &self.config.alerts);
         if eval
             .events
@@ -361,9 +365,16 @@ impl App {
             }
         }
         self.utc_offset_secs = crate::clock::local_offset_secs((s.taken_at_ms / 1000) as i64);
-        self.snapshot = Some(s);
+        let old = self.snapshot.replace(s);
         self.diagnostics_offset = self.diagnostics_offset.min(self.diagnostics_max_offset);
-        self.clamp_selection(old_index);
+        // The old rank is the fallback when the selected process is gone;
+        // it is only worked out then, so a normal refresh sorts one list.
+        self.clamp_selection_with(|app| {
+            app.visible_in(old.as_ref())
+                .iter()
+                .position(|p| Some(p.pid) == app.procs.selected_pid)
+                .unwrap_or(0)
+        });
     }
 
     /// Updates the process viewport after a terminal resize.
@@ -380,6 +391,12 @@ impl App {
     }
 
     fn clamp_selection(&mut self, fallback: usize) {
+        self.clamp_selection_with(|_| fallback);
+    }
+
+    /// Keeps the selected process when it is still listed, else selects the
+    /// row at the rank `fallback` gives, clamped to the list.
+    fn clamp_selection_with(&mut self, fallback: impl FnOnce(&Self) -> usize) {
         // Missing data does not establish that the selected process exited.
         if self
             .snapshot
@@ -393,7 +410,7 @@ impl App {
         let index = list
             .iter()
             .position(|p| Some(p.pid) == self.procs.selected_pid)
-            .unwrap_or(fallback.min(len.saturating_sub(1)));
+            .unwrap_or_else(|| fallback(self).min(len.saturating_sub(1)));
         self.procs.selected_pid = list.get(index).map(|p| p.pid);
         self.scroll_process_selection(index, len);
     }

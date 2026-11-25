@@ -133,13 +133,16 @@ fn parse_mountinfo(table: &[u8]) -> Vec<Mount> {
 ///
 /// `reach(i)` holds when looking up mount i's mount point lands on the stack
 /// of mounts at that path that contains i:
-/// - a root mount (its parent is outside the table) is reached;
 /// - a mount on top of its parent at the same path is reached when the
 ///   parent is;
 /// - otherwise the mount sits on a directory inside its parent, and is
-///   reached only when the parent is visible, no other mount on that parent
-///   covers one of its ancestor directories, and no later mount on that
-///   parent has the same path.
+///   reached only when no other mount on that parent (by parent ID; the
+///   parent itself excluded, since a root may name itself as its parent)
+///   covers one of its ancestor directories, no later mount on that parent
+///   has the same path, and the parent is visible. A parent whose record is
+///   absent (outside the process root, as in a chroot or container, or the
+///   root's own parent) cannot be judged, so it counts as visible: such a
+///   mount is shown unless a sibling covers it.
 ///
 /// A mount is visible when it is reached and nothing sits on it (no child at
 /// the same path). So when NFS covers an ext4 `/data`, an ext4 mount at
@@ -174,21 +177,32 @@ fn visible(mounts: &[Mount]) -> Vec<&Mount> {
         }
         state[i] = State::Visiting;
         let m = &mounts[i];
-        let r = match parent_of(i) {
-            None => true,
+        let parent = parent_of(i);
+        let r = match parent {
             Some(p) if mounts[p].point == m.point => reach(p, mounts, parent_of, covered, state),
-            Some(p) => {
+            _ => {
+                // Siblings are the other mounts recorded on the same parent
+                // ID, whether or not that parent's own record is in the table;
+                // the parent itself is not one. A root that names itself as
+                // its parent has none: mounts naming it are its children.
                 let point = as_path(&m.point);
-                let hidden_by_sibling = mounts.iter().enumerate().any(|(j, s)| {
-                    j != i
-                        && s.parent == mounts[p].id
-                        && if s.point == m.point {
-                            j > i
-                        } else {
-                            point.starts_with(as_path(&s.point))
-                        }
-                });
-                !hidden_by_sibling && !covered(p) && reach(p, mounts, parent_of, covered, state)
+                let hidden_by_sibling = m.parent != m.id
+                    && mounts.iter().enumerate().any(|(j, s)| {
+                        j != i
+                            && Some(j) != parent
+                            && s.parent == m.parent
+                            && if s.point == m.point {
+                                j > i
+                            } else {
+                                point.starts_with(as_path(&s.point))
+                            }
+                    });
+                // With the parent's record absent, whether the parent is
+                // itself reached cannot be decided, so it is taken as reached:
+                // an undecidable mount is shown rather than hidden.
+                !hidden_by_sibling
+                    && parent
+                        .is_none_or(|p| !covered(p) && reach(p, mounts, parent_of, covered, state))
             }
         };
         state[i] = State::Done(r);
@@ -352,6 +366,19 @@ mod tests {
         assert_eq!(asked, paths(&["/", "/data/later"]));
     }
 
+    /// In a chroot, NFS on /data and an ext4 /data/local below it share a
+    /// parent whose record is absent; statvfs must not reach NFS through
+    /// /data/local.
+    #[test]
+    fn a_covered_mount_on_an_absent_parent_is_not_queried() {
+        let asked = queried(
+            b"3 1 8:3 / /data/local rw - ext4 /dev/sdc1 rw\n\
+              4 1 0:50 / /data rw - nfs4 server:/x rw\n\
+              5 1 8:17 / /srv rw - ext4 /dev/sdb1 rw\n",
+        );
+        assert_eq!(asked, paths(&["/srv"]));
+    }
+
     /// Which mounts are visible, by mount and parent IDs, for each way one
     /// mount can hide another.
     #[test]
@@ -381,6 +408,30 @@ mod tests {
             // An overmounted root hides everything mounted on the old root.
             (
                 "1 0 8:1 / / rw - ext4 /dev/sda1 rw\n2 1 8:2 / /home rw - ext4 /dev/sdb rw\n3 1 8:3 / / rw - ext4 /dev/sdc rw\n",
+                &["/"],
+            ),
+            // Inside a chroot or container the parent record can be absent
+            // (the kernel skips mounts outside the process root). Siblings on
+            // that absent parent still cover each other: NFS on /data hides an
+            // ext4 /data/local mounted on the same parent before it.
+            (
+                "3 1 8:3 / /data/local rw - ext4 /dev/sdc rw\n4 1 0:50 / /data rw - nfs4 server:/x rw\n",
+                &["/data"],
+            ),
+            // Mounts on an absent parent that no sibling covers stay visible.
+            (
+                "3 1 0:5 / /proc rw - proc proc rw\n4 1 8:4 / /data rw - ext4 /dev/sdd rw\n5 1 8:5 / /data2 rw - ext4 /dev/sde rw\n",
+                &["/proc", "/data", "/data2"],
+            ),
+            // The namespace root may name itself as its parent; it is not a
+            // sibling of its own children.
+            (
+                "1 1 8:1 / / rw - ext4 /dev/sda1 rw\n2 1 8:2 / /data rw - ext4 /dev/sdb rw\n3 1 8:3 / /boot rw - ext4 /dev/sdc rw\n",
+                &["/", "/data", "/boot"],
+            ),
+            // A self-parented root overmounted at / still hides what sat on it.
+            (
+                "1 1 8:1 / / rw - ext4 /dev/sda1 rw\n2 1 8:2 / /home rw - ext4 /dev/sdb rw\n3 1 8:3 / / rw - ext4 /dev/sdc rw\n",
                 &["/"],
             ),
             // A parent cycle in a malformed table hides its mounts.

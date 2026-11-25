@@ -149,7 +149,7 @@ Unknown keys and invalid values are errors that name the key, printed before the
 | `--print-config` | Print the documented default config and exit |
 | `--once` | Take a warm-up sample, a baseline sample 250 ms later, and the reported sample one full interval after the baseline, print a plain text report with instantaneous alert levels (sustain 1, since a single report has no history), and exit |
 | `--json` | With `--once`, print the report as JSON |
-| `--screenshot PATH` | Render the real UI with live data to an SVG file and exit |
+| `--screenshot PATH` | Render the real UI with live data to an SVG file and exit; the file is created readable by its owner only (mode 0600), since it can show host, user and process names |
 | `--size WxH` | Terminal size for `--screenshot`, default 120x40 |
 | `--screen NAME` | Screen for `--screenshot`: overview, processes, diagnostics |
 | `--redact` | With `--once` or `--screenshot`: replace the hostname, user names other than system service accounts, process names outside a list of generic programs, interface names other than `lo`, `ethN`, `wlanN` and bus-position predictable names (MAC-based names are masked), and mount points outside a standard set (aliased `/mnt/disk-N`) with neutral labels, before alerts are evaluated; hardware and driver names (kernel release, CPU and GPU models, sensor chips and labels, block devices, battery name, kernel threads) are kept; numbers are unchanged |

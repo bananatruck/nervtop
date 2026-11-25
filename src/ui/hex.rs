@@ -131,7 +131,16 @@ pub fn draw_consensus(frame: &mut Frame, area: Rect, consensus: &Consensus, pale
         .filter_map(|c| c.reason.as_ref().map(|r| format!("{}: {r}", c.cell.name())))
         .collect();
 
-    if area.height < 5 {
+    // The full layout puts three 22-column cells beside a bordered box whose
+    // first line is the verdict. `Min` outranks `Length`, so a narrow frame
+    // would clip that line; use the compact layout unless it fits whole.
+    let verdict_cells = super::fmt::display_width(&format!(
+        "VERDICT {} / {}",
+        consensus.verdict.label(),
+        consensus.agreement
+    ));
+    let full_width = 3 * 22 + 2 + verdict_cells;
+    if area.height < 5 || usize::from(area.width) < full_width {
         let v_color = level_color(palette, consensus.verdict);
         if area.height >= 2 {
             let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(area);
@@ -266,6 +275,28 @@ mod tests {
             out.push('\n');
         }
         out
+    }
+
+    /// The verdict and agreement stay complete: a frame too narrow for the
+    /// three cells and the whole bordered verdict line uses the compact
+    /// layout, as a short frame does; a wide one keeps the full layout.
+    #[test]
+    fn the_verdict_line_is_complete_at_every_width() {
+        let app = crate::ui::testkit::nominal_app();
+        let verdict = format!(
+            "VERDICT {} / {}",
+            app.consensus.verdict.label(),
+            app.consensus.agreement
+        );
+        for (width, full) in [(80, false), (94, false), (120, true), (200, true)] {
+            let text =
+                crate::ui::testkit::buffer_text(&crate::ui::testkit::render(&app, width, 40));
+            assert!(
+                text.contains(&verdict),
+                "{width}: {verdict} missing\n{text}"
+            );
+            assert_eq!(text.contains(" CONSENSUS "), full, "{width}");
+        }
     }
 
     #[test]

@@ -248,6 +248,7 @@ pub fn text(s: &Snapshot, eval: &Evaluation) -> String {
                 let state = match g.power_state {
                     GpuPower::Active => "active",
                     GpuPower::Suspended => "suspended (not woken to read it)",
+                    GpuPower::Unknown => "power state unknown (not queried)",
                 };
                 field(&mut out, &g.pci_slot, format!("{}, {state}", g.name));
                 field(

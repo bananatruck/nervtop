@@ -224,10 +224,14 @@ pub enum GpuVendor {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GpuPower {
-    /// The device is powered and its fields were queried.
+    /// The device's runtime status was read and is not suspended. Each field
+    /// carries its own availability, including why it was not queried (a
+    /// `resuming` or `error` status, or another adapter that is asleep).
     Active,
     /// The device is runtime-suspended; fields were not queried so it stays asleep.
     Suspended,
+    /// The device's runtime status could not be read; fields were not queried.
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]

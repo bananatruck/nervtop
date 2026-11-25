@@ -442,12 +442,12 @@ impl Source for Gpus {
                 "gpu metrics not supported",
             );
             match vendor {
-                GpuVendor::Nvidia if nvidia_unreadable => {
+                GpuVendor::Nvidia if runtime.is_err() => {
                     gpu = unavailable(
                         slot,
                         vendor,
                         gpu.name,
-                        GpuPower::Active,
+                        GpuPower::Unknown,
                         "gpu power state unreadable",
                     );
                 }
@@ -458,6 +458,17 @@ impl Source for Gpus {
                         _ => "gpu runtime pm status unrecognized",
                     };
                     gpu = unavailable(slot, vendor, gpu.name, GpuPower::Active, reason);
+                }
+                // This adapter is awake; another one's state rules out the
+                // query, which touches every NVIDIA device.
+                GpuVendor::Nvidia if nvidia_unreadable => {
+                    gpu = unavailable(
+                        slot,
+                        vendor,
+                        gpu.name,
+                        GpuPower::Active,
+                        "not queried: another nvidia gpu's power state is unreadable",
+                    );
                 }
                 GpuVendor::Nvidia if nvidia_asleep => {
                     gpu = unavailable(
@@ -752,9 +763,20 @@ mod tests {
         let (mut g, calls) = source(t.path(), Ok(CSV.into()));
         let reading = g.sample();
         assert_eq!(calls.load(Ordering::SeqCst), 0);
-        for row in reading.value().unwrap() {
-            assert_eq!(row.power_watts.reason(), Some("gpu power state unreadable"));
-        }
+        let rows = reading.value().unwrap();
+        // The awake peer keeps its known state; only why it was not queried
+        // is about the other adapter.
+        assert_eq!(rows[0].power_state, GpuPower::Active);
+        assert_eq!(
+            rows[0].power_watts.reason(),
+            Some("not queried: another nvidia gpu's power state is unreadable")
+        );
+        // The adapter whose status could not be read is not called active.
+        assert_eq!(rows[1].power_state, GpuPower::Unknown);
+        assert_eq!(
+            rows[1].power_watts.reason(),
+            Some("gpu power state unreadable")
+        );
     }
     #[test]
     fn invalid_gpu_values_are_unavailable() {

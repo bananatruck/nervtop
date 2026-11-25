@@ -180,8 +180,9 @@ pub struct Gpus {
     names: Option<String>,
     name_cache: BTreeMap<(u16, u16), Option<String>>,
     cached: Result<BTreeMap<String, GpuStats>, String>,
-    /// Device ID of each NVIDIA slot when `cached` was queried, so a cached
-    /// row is never applied to a different card at the same slot.
+    /// Device ID of each NVIDIA slot across the query that filled `cached`:
+    /// read before and after the command, and `None` when the two differ, so
+    /// a row is never applied to a different card at the same slot.
     cached_ids: BTreeMap<String, Option<u16>>,
     queried_at: Option<Instant>,
 }
@@ -203,7 +204,7 @@ impl Gpus {
             queried_at: None,
         }
     }
-    fn query(&mut self, nvidia_ids: &BTreeMap<String, Option<u16>>) {
+    fn query(&mut self, nvidia: &BTreeMap<String, (PathBuf, Option<u16>)>) {
         // The throttle keeps counting from the last command while its
         // cleanup is pending, so the next command runs only after cleanup
         // has finished and two seconds have passed since the last one.
@@ -217,10 +218,22 @@ impl Gpus {
         {
             return;
         }
-        self.cached_ids = nvidia_ids.clone();
         self.cached = self.runner.run("nvidia-smi", &["--query-gpu=pci.bus_id,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw", "--format=csv,noheader,nounits"], Duration::from_secs(2)).map(|text| parse_csv(&text));
         self.queried_at = Some(Instant::now());
+        // A card replaced at a slot while the command ran could have answered
+        // for it; only a slot whose ID is the same afterwards keeps its row.
+        self.cached_ids = nvidia
+            .iter()
+            .map(|(slot, (dir, before))| {
+                let after = device_id(dir);
+                (slot.clone(), before.filter(|_| after == *before))
+            })
+            .collect();
     }
+}
+/// The PCI device ID in `dir/device`.
+fn device_id(dir: &Path) -> Option<u16> {
+    read(dir.join("device")).and_then(|v| u16::from_str_radix(v.trim_start_matches("0x"), 16).ok())
 }
 fn unavailable(
     slot: String,
@@ -375,11 +388,12 @@ impl Source for Gpus {
         let nvidia_asleep = adapters.iter().any(|(_, (vendor, _), runtime)| {
             *vendor == Some(0x10de) && !runtime_settled_awake(runtime)
         });
-        let nvidia_ids: BTreeMap<String, Option<u16>> = adapters
+        let nvidia: BTreeMap<String, (PathBuf, Option<u16>)> = adapters
             .iter()
             .filter(|(_, (vendor, _), _)| *vendor == Some(0x10de))
             .filter_map(|(dir, (_, device), _)| {
-                normalize_slot(&dir.file_name()?.to_string_lossy()).map(|slot| (slot, *device))
+                normalize_slot(&dir.file_name()?.to_string_lossy())
+                    .map(|slot| (slot, (dir.clone(), *device)))
             })
             .collect();
         let nvidia_unreadable = adapters
@@ -482,7 +496,7 @@ impl Source for Gpus {
                     );
                 }
                 GpuVendor::Nvidia => {
-                    self.query(&nvidia_ids);
+                    self.query(&nvidia);
                     match &self.cached {
                         Ok(rows) => {
                             let key = normalize_slot(&slot);
@@ -918,6 +932,45 @@ mod tests {
         g.sample();
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
+    /// A card replaced at the same slot while nvidia-smi runs could answer
+    /// for the old one; its row is discarded, and a stable card keeps its row.
+    #[test]
+    fn a_card_replaced_during_the_query_gets_no_row() {
+        struct SwappingRunner {
+            device: PathBuf,
+        }
+        impl CommandRunner for SwappingRunner {
+            fn run(&mut self, _: &str, _: &[&str], _: Duration) -> Result<String, String> {
+                std::fs::write(&self.device, "0x2900").unwrap();
+                Ok(CSV.into())
+            }
+        }
+        let t = tempfile::tempdir().unwrap();
+        device(t.path(), "0000:01:00.0", "0x10de", "0x28e0", "active");
+        let device_file = t.path().join("sys/bus/pci/devices/0000:01:00.0/device");
+        let mut g = Gpus::with_runner(
+            t.path().into(),
+            Box::new(SwappingRunner {
+                device: device_file.clone(),
+            }),
+        );
+        let reading = g.sample();
+        let row = &reading.value().unwrap()[0];
+        assert_eq!(
+            row.temperature_celsius.reason(),
+            Some("gpu changed since last query")
+        );
+
+        // A card that stays the same during the query keeps its row.
+        let (mut g, _) = source(t.path(), Ok(CSV.into()));
+        std::fs::write(&device_file, "0x28e0").unwrap();
+        let reading = g.sample();
+        assert_eq!(
+            reading.value().unwrap()[0].temperature_celsius,
+            Reading::Available(48.0)
+        );
+    }
+
     /// A reaper finishing early does not let a query start before the
     /// throttle since the last one has expired.
     #[test]

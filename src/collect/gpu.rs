@@ -204,9 +204,11 @@ impl Gpus {
         }
     }
     fn query(&mut self, nvidia_ids: &BTreeMap<String, Option<u16>>) {
+        // The throttle keeps counting from the last command while its
+        // cleanup is pending, so the next command runs only after cleanup
+        // has finished and two seconds have passed since the last one.
         if self.pending_reaper.load(Ordering::SeqCst) {
             self.cached = Err("previous nvidia-smi still running".into());
-            self.queried_at = None;
             return;
         }
         if self
@@ -913,6 +915,47 @@ mod tests {
         );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         pending.store(false, Ordering::SeqCst);
+        g.sample();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+    /// A reaper finishing early does not let a query start before the
+    /// throttle since the last one has expired.
+    #[test]
+    fn a_finished_reaper_still_waits_for_the_query_throttle() {
+        struct DeferredRunner {
+            pending: Arc<AtomicBool>,
+            calls: Arc<AtomicUsize>,
+        }
+        impl CommandRunner for DeferredRunner {
+            fn pending_reaper(&self) -> Option<Arc<AtomicBool>> {
+                Some(self.pending.clone())
+            }
+            fn run(&mut self, _: &str, _: &[&str], _: Duration) -> Result<String, String> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                self.pending.store(true, Ordering::SeqCst);
+                Err("nvidia-smi timeout".into())
+            }
+        }
+        let t = tempfile::tempdir().unwrap();
+        device(t.path(), "0000:01:00.0", "0x10de", "0x28e0", "active");
+        let pending = Arc::new(AtomicBool::new(false));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut g = Gpus::with_runner(
+            t.path().into(),
+            Box::new(DeferredRunner {
+                pending: pending.clone(),
+                calls: calls.clone(),
+            }),
+        );
+        g.sample();
+        g.sample();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        // Cleanup finishes within the throttle: no new command yet.
+        pending.store(false, Ordering::SeqCst);
+        g.sample();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        // Once the throttle has expired, the next query runs.
+        g.queried_at = Some(Instant::now() - Duration::from_secs(3));
         g.sample();
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }

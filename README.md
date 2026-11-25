@@ -206,7 +206,12 @@ Use --print-config to see all configuration keys and defaults.
 
 `nervtop --once` prints a plain text report of every reading (the 15 busiest processes rather than the full list), every rule and the consensus, which is handy over SSH or in a script.
 `nervtop --once --json` prints the full snapshot, every rule and the consensus as JSON for other tools and agents.
-Each panel's data (`cpu`, `memory`, `disks`, `network`, `processes` and so on) is a reading, `{"status": "available", "value": ...}` or `{"status": "unavailable", "value": "<reason>"}`, and so is each field that can be unavailable on its own, such as a process's `cpu_percent`.
+Its fields come in three kinds:
+
+- Readings are `{"status": "available", "value": ...}` or `{"status": "unavailable", "value": "<reason>"}`: every panel under `snapshot` (`cpu`, `memory`, `disks`, `network`, `processes`, `sensors`, `gpus`, `battery`), the `host` fields, and fields measured on their own, which are the load average, disk and network rates and totals, the GPU figures, battery power, time remaining and health, and a process's `cpu_percent`; for example `"load_avg": {"status": "available", "value": [5.0, 2.64, 1.92]}`.
+- Optional fields, which a machine may simply not report, are the bare value or `null`, never a reading: `freq_mhz` and `brand` of the CPU, `crit_celsius` of a temperature, and `ac_online`, `charge_limit_percent` and `cycle_count` of the battery; for example `"crit_celsius": 89.85` or `"cycle_count": null`.
+- Everything else is a plain value, for example `"memory_bytes": 10170368`.
+
 Add `--redact` to `--once` or `--screenshot` before sharing the output: it masks the hostname, user names other than system service accounts, process names outside a short list of generic programs, network interface names other than `lo`, `ethN`, `wlanN` and bus-position names such as `enp3s0`, in which every systemd naming marker carries its number (MAC-based names such as `enx001122aabbcc`, and look-alikes such as `ens1finn`, are masked), and every mount point outside a standard set (`/`, `/boot`, `/home`, `/var` and similar), which become `/mnt/disk-1`, `/mnt/disk-2` and so on; every number is unchanged.
 It keeps hardware and driver names, which identify a machine model rather than a person: the kernel release, CPU and GPU models, sensor chip and label names, block device names and the battery name, as well as kernel thread names.
 Control characters in any collected name are always replaced with `?`, with or without `--redact`, so a process name cannot inject terminal escape sequences into a report.
@@ -342,7 +347,7 @@ Changes since v0.1.2:
 - The header, footer, consensus strip and thermal panel fit their text by terminal cells, so a wide hostname, a narrow terminal or a long sensor label no longer clips the clock, the verdict or the temperature.
 - `--redact` now also masks interface names that only look predictable: a kept name must be systemd's naming markers each followed by its number (`ens33`, `enp0s31f6`), so a name such as `ens1finn` is masked.
 - Screenshot files are created readable and writable by their owner only.
-- In `--once --json` output, a process's `cpu_percent` is now a reading object, like other fields that can be unavailable on their own, instead of a bare number: `{"status": "available", "value": 0.0}`, or `{"status": "unavailable", "value": "warming up"}`.
+- In `--once --json` output, a process's `cpu_percent` is now a reading object, like the other readings, instead of a bare number: `{"status": "available", "value": 0.0}`, or `{"status": "unavailable", "value": "warming up"}`.
   Scripts that read `snapshot.processes.value[].cpu_percent` as a number need updating.
 
 Known limits:

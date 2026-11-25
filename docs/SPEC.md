@@ -151,7 +151,7 @@ Unknown keys and invalid values are errors that name the key, printed before the
 | `--theme NAME` | Start with this theme; colour overrides from the config file apply only to the theme they were written for |
 | `--print-config` | Print the documented default config and exit |
 | `--once` | Take a warm-up sample, a baseline sample 250 ms later, and the reported sample one full interval after the baseline, print a plain text report with instantaneous alert levels (sustain 1, since a single report has no history), and exit |
-| `--json` | With `--once`, print the report as JSON; each panel's data and each field that can be unavailable on its own (such as a process's `cpu_percent`) is `{"status": "available", "value": ...}` or `{"status": "unavailable", "value": "<reason>"}` |
+| `--json` | With `--once`, print the report as JSON. Fields typed `Reading` in `src/model.rs` (every panel, the host fields, load average, disk and network rates and totals, GPU figures, battery power, time remaining and health, a process's `cpu_percent`) are `{"status": "available", "value": ...}` or `{"status": "unavailable", "value": "<reason>"}`; fields typed `Option` (`freq_mhz`, `brand`, `crit_celsius`, `ac_online`, `charge_limit_percent`, `cycle_count`) are the bare value or `null`; all other fields are plain values |
 | `--screenshot PATH` | Render the real UI with live data to an SVG file and exit; the file is created readable by its owner only (mode 0600), since it can show host, user and process names |
 | `--size WxH` | Terminal size for `--screenshot`, default 120x40 |
 | `--screen NAME` | Screen for `--screenshot`: overview, processes, diagnostics |

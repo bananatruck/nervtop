@@ -151,11 +151,11 @@ Unknown keys and invalid values are errors that name the key, printed before the
 | `--theme NAME` | Start with this theme; colour overrides from the config file apply only to the theme they were written for |
 | `--print-config` | Print the documented default config and exit |
 | `--once` | Take a warm-up sample, a baseline sample 250 ms later, and the reported sample one full interval after the baseline, print a plain text report with instantaneous alert levels (sustain 1, since a single report has no history), and exit |
-| `--json` | With `--once`, print the report as JSON |
+| `--json` | With `--once`, print the report as JSON; each panel's data and each field that can be unavailable on its own (such as a process's `cpu_percent`) is `{"status": "available", "value": ...}` or `{"status": "unavailable", "value": "<reason>"}` |
 | `--screenshot PATH` | Render the real UI with live data to an SVG file and exit; the file is created readable by its owner only (mode 0600), since it can show host, user and process names |
 | `--size WxH` | Terminal size for `--screenshot`, default 120x40 |
 | `--screen NAME` | Screen for `--screenshot`: overview, processes, diagnostics |
-| `--redact` | With `--once` or `--screenshot`: replace the hostname, user names other than system service accounts, process names outside a list of generic programs, interface names other than `lo`, `ethN`, `wlanN` and bus-position predictable names (MAC-based names are masked), and mount points outside a standard set (aliased `/mnt/disk-N`) with neutral labels, before alerts are evaluated; hardware and driver names (kernel release, CPU and GPU models, sensor chips and labels, block devices, battery name, kernel threads) are kept; numbers are unchanged |
+| `--redact` | With `--once` or `--screenshot`: replace the hostname, user names other than system service accounts, process names outside a list of generic programs, interface names other than `lo`, `ethN`, `wlanN` and bus-position predictable names in which every systemd naming marker carries its number (MAC-based names and look-alikes such as `ens1finn` are masked), and mount points outside a standard set (aliased `/mnt/disk-N`) with neutral labels, before alerts are evaluated; hardware and driver names (kernel release, CPU and GPU models, sensor chips and labels, block devices, battery name, kernel threads) are kept; numbers are unchanged |
 | `--samples N` | Samples taken one interval apart before `--screenshot` renders, 1 to 600, default 4, so history and sustained alert levels are real |
 | `-h`, `--help` and `-V`, `--version` | Help and version |
 

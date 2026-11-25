@@ -206,7 +206,8 @@ Use --print-config to see all configuration keys and defaults.
 
 `nervtop --once` prints a plain text report of every reading (the 15 busiest processes rather than the full list), every rule and the consensus, which is handy over SSH or in a script.
 `nervtop --once --json` prints the full snapshot, every rule and the consensus as JSON for other tools and agents.
-Add `--redact` to `--once` or `--screenshot` before sharing the output: it masks the hostname, user names other than system service accounts, process names outside a short list of generic programs, network interface names other than `lo`, `ethN`, `wlanN` and bus-position names such as `enp3s0` (MAC-based names such as `enx001122aabbcc` are masked), and every mount point outside a standard set (`/`, `/boot`, `/home`, `/var` and similar), which become `/mnt/disk-1`, `/mnt/disk-2` and so on; every number is unchanged.
+Each panel's data (`cpu`, `memory`, `disks`, `network`, `processes` and so on) is a reading, `{"status": "available", "value": ...}` or `{"status": "unavailable", "value": "<reason>"}`, and so is each field that can be unavailable on its own, such as a process's `cpu_percent`.
+Add `--redact` to `--once` or `--screenshot` before sharing the output: it masks the hostname, user names other than system service accounts, process names outside a short list of generic programs, network interface names other than `lo`, `ethN`, `wlanN` and bus-position names such as `enp3s0`, in which every systemd naming marker carries its number (MAC-based names such as `enx001122aabbcc`, and look-alikes such as `ens1finn`, are masked), and every mount point outside a standard set (`/`, `/boot`, `/home`, `/var` and similar), which become `/mnt/disk-1`, `/mnt/disk-2` and so on; every number is unchanged.
 It keeps hardware and driver names, which identify a machine model rather than a person: the kernel release, CPU and GPU models, sensor chip and label names, block device names and the battery name, as well as kernel thread names.
 Control characters in any collected name are always replaced with `?`, with or without `--redact`, so a process name cannot inject terminal escape sequences into a report.
 A one-shot report has no history, so its alert levels are instantaneous (sustain 1).
@@ -219,7 +220,7 @@ When something cannot be read, nervtop shows `unavailable` and the reason, never
 | Data | Source |
 | --- | --- |
 | CPU usage | `/proc/stat` counter deltas |
-| Load, CPU model, processes, users | [`sysinfo`](https://crates.io/crates/sysinfo) |
+| Load, CPU model, processes, users | [`sysinfo`](https://crates.io/crates/sysinfo); process names from `/proc/<pid>/stat` when its start time matches, so a process that called `exec` shows its new name |
 | CPU frequency | `scaling_cur_freq` per online CPU, else that CPU's `cpu MHz` or `clock` in `/proc/cpuinfo` |
 | Memory and swap | `/proc/meminfo`, with current-read failure detection |
 | Disk space | `/proc/self/mountinfo` filtered to visible block-device mounts (by mount and parent IDs), then `statvfs(3)`, one entry per device; network and FUSE mounts, and local mounts hidden under them, are never queried, so a hung server cannot freeze nervtop |
@@ -285,7 +286,7 @@ cargo clippy --all-targets --locked -- -D warnings
 cargo fmt --check
 ```
 
-The suite has 295 passing tests (and 2 ignored ones that need the live machine or a real terminal: run them with `cargo test -- --ignored`).
+The suite has 326 passing tests (and 2 ignored ones that need the live machine or a real terminal: run them with `cargo test -- --ignored`).
 Parsers are tested against captured sysfs and procfs text, including the battery values of a real ASUS laptop, and every sysfs reader takes a root directory so tests run on temporary trees.
 Render tests draw the real UI into ratatui's `TestBackend` at 80x24, 120x40 and 200x60 and assert on the drawn buffer.
 Integration tests run the built binary.
@@ -317,14 +318,32 @@ Version 0.1.3 is complete for its scope: every panel, screen, key, config option
 Changes since v0.1.2:
 
 - CPU usage reads fresh counters and requires a valid baseline old enough for a rate; failed reads restart warm-up, and load-average availability is independent.
+- CPU frequency is read per logical CPU ID from `scaling_cur_freq`, else from that CPU's `cpu MHz` or `clock` line; BogoMIPS is never shown as a frequency, and a CPU with no frequency source shows none.
 - Memory and swap read fresh values each sample and report read or parse failures as unavailable.
 - Network rates follow interface identity across renames and replacements, reject unreadable counters, and keep availability separate for each direction's totals and rates.
   Interface names retain their raw identity and are escaped for display.
+- An interface whose counters start at zero gets rates from its next sample, and an interface that changed between reads keeps its row with its readings unavailable instead of disappearing or adding a partial total.
+- After a pause, network rates start again from fresh baselines instead of counting the paused interval.
 - Process owners refresh periodically, failed scans restart warm-up, and the selected process survives an unavailable scan.
   Navigation reuses one sorted process list per action.
+- A process that calls `exec` shows the name of its new program.
+- A process's CPU usage shows `--` ("warming up") until it has been measured: on its first scan, and after a scan in which it had used no CPU time if it has used some since; such processes sort after measured ones, and a process idle across two scans shows a measured 0.
 - GPU queries bound output reads and preserve device identity across cache hits.
+- Each NVIDIA GPU's device ID is checked again after the `nvidia-smi` query, so a card that changed meanwhile gets no row, and a timed-out query still counts toward the two-second limit while it is cleaned up.
+- A GPU whose power status cannot be read is reported as "power state unknown", and other GPUs keep their own state and reason.
 - Disk alerts track kernel devices rather than mount labels.
+- Disks are read from `/proc/self/mountinfo`, and only mounts that path lookup actually reaches are queried, so a local mount hidden under a network mount (for example under NFS on `/data`) is never asked for space; this also holds in a chroot or container.
+- A mount point that is not valid UTF-8 is shown with those bytes escaped as `\xNN`, and a device whose first mount point cannot be queried falls back to another one.
+- The AC adapter reads as unknown, not offline, when a power supply cannot be classified; battery percentage, time remaining and health each use one complete energy or charge pair.
+- A hwmon directory that exists but cannot be listed reads "hwmon sensors not readable"; vt1211 channels that are not in degrees Celsius are left out.
 - Diagnostics tables scroll with the navigation keys and clamp to the rows that fit after resizing or inventory changes.
+- Page keys in diagnostics move by the number of rows the tables show, and the position is kept while the terminal is too small to draw them.
+- Storage and network rows show each available read or write direction when the other is unavailable, shortening an unavailable one to `-` on narrow terminals; alert rule values are never clipped.
+- The header, footer, consensus strip and thermal panel fit their text by terminal cells, so a wide hostname, a narrow terminal or a long sensor label no longer clips the clock, the verdict or the temperature.
+- `--redact` now also masks interface names that only look predictable: a kept name must be systemd's naming markers each followed by its number (`ens33`, `enp0s31f6`), so a name such as `ens1finn` is masked.
+- Screenshot files are created readable and writable by their owner only.
+- In `--once --json` output, a process's `cpu_percent` is now a reading object, like other fields that can be unavailable on their own, instead of a bare number: `{"status": "available", "value": 0.0}`, or `{"status": "unavailable", "value": "warming up"}`.
+  Scripts that read `snapshot.processes.value[].cpu_percent` as a number need updating.
 
 Known limits:
 

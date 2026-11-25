@@ -195,6 +195,15 @@ fn read(path: impl AsRef<Path>) -> Option<String> {
 fn number<T: std::str::FromStr>(path: impl AsRef<Path>) -> Option<T> {
     read(path)?.parse().ok()
 }
+/// The sorted entries of a directory, or the error that stopped the listing:
+/// opening it, or reading any one entry, so no entry is silently left out.
+fn entries_checked(path: impl AsRef<Path>) -> std::io::Result<Vec<PathBuf>> {
+    let mut paths = std::fs::read_dir(path)?
+        .map(|e| e.map(|e| e.path()))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    paths.sort();
+    Ok(paths)
+}
 fn entries(path: impl AsRef<Path>) -> Vec<PathBuf> {
     let mut paths: Vec<_> = std::fs::read_dir(path)
         .into_iter()

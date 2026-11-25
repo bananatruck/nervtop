@@ -616,15 +616,8 @@ fn draw_io_table(frame: &mut Frame, area: Rect, app: &App) {
                 } else {
                     d.mount_point.clone()
                 };
-                let (rw_s, rw_st) = match (&d.read_bps, &d.write_bps) {
-                    (Reading::Available(r), Reading::Available(w)) => (
-                        format!("R {} W {}", fmt::rate(*r), fmt::rate(*w)),
-                        text_style,
-                    ),
-                    (Reading::Unavailable(r), _) | (_, Reading::Unavailable(r)) => {
-                        (fmt::unavailable_str(r, 20), unknown)
-                    }
-                };
+                let (rw_s, rw_st) =
+                    directions(("R", &d.read_bps), ("W", &d.write_bps), text_style, unknown);
                 raw_rows.push((
                     [label, fmt::bytes_pair(d.used_bytes(), d.total_bytes), rw_s],
                     [text_style, muted, rw_st],
@@ -646,15 +639,8 @@ fn draw_io_table(frame: &mut Frame, area: Rect, app: &App) {
         }
         Reading::Available(ifaces) => {
             for n in sorted_interfaces(ifaces) {
-                let (rx_tx_s, rx_tx_st) = match (&n.rx_bps, &n.tx_bps) {
-                    (Reading::Available(rx), Reading::Available(tx)) => (
-                        format!("RX {} TX {}", fmt::rate(*rx), fmt::rate(*tx)),
-                        text_style,
-                    ),
-                    (Reading::Unavailable(r), _) | (_, Reading::Unavailable(r)) => {
-                        (fmt::unavailable_str(r, 20), unknown)
-                    }
-                };
+                let (rx_tx_s, rx_tx_st) =
+                    directions(("RX", &n.rx_bps), ("TX", &n.tx_bps), text_style, unknown);
                 raw_rows.push((
                     [
                         n.name.clone(),
@@ -725,6 +711,25 @@ fn draw_io_table(frame: &mut Frame, area: Rect, app: &App) {
             inner,
         );
     }
+}
+
+/// The two rates of one device, each shown on its own, so a direction that
+/// is unavailable does not hide the other's reading. Both unavailable show
+/// the first reason, as one reading.
+fn directions(
+    first: (&str, &Reading<f64>),
+    second: (&str, &Reading<f64>),
+    text_style: Style,
+    unknown: Style,
+) -> (String, Style) {
+    if let (Reading::Unavailable(reason), Reading::Unavailable(_)) = (first.1, second.1) {
+        return (fmt::unavailable_str(reason, 20), unknown);
+    }
+    let part = |(label, reading): (&str, &Reading<f64>)| match reading {
+        Reading::Available(v) => format!("{label} {}", fmt::rate(*v)),
+        Reading::Unavailable(_) => format!("{label} unavailable"),
+    };
+    (format!("{} {}", part(first), part(second)), text_style)
 }
 
 fn draw_rules_table(frame: &mut Frame, area: Rect, app: &App) {
@@ -990,6 +995,29 @@ mod tests {
             "capacity column lost: {row:?}"
         );
     }
+    /// One unavailable direction does not hide the other's reading.
+    #[test]
+    fn each_available_io_direction_stays_visible() {
+        let mut app = nominal_app();
+        app.screen = Screen::Diagnostics;
+        let snapshot = app.snapshot.as_mut().unwrap();
+        let Reading::Available(nets) = &mut snapshot.network else {
+            unreachable!()
+        };
+        nets[0].rx_bps = Reading::Available(2048.0);
+        nets[0].tx_bps = Reading::unavailable("counter not readable");
+        let Reading::Available(disks) = &mut snapshot.disks else {
+            unreachable!()
+        };
+        disks[0].read_bps = Reading::unavailable("warming up");
+        disks[0].write_bps = Reading::Available(4096.0);
+        let text = buffer_lines(&render(&app, 200, 60)).join("\n");
+        let rx = format!("RX {} TX unavailable", crate::ui::fmt::rate(2048.0));
+        let w = format!("R unavailable W {}", crate::ui::fmt::rate(4096.0));
+        assert!(text.contains(&rx), "{rx} missing\n{text}");
+        assert!(text.contains(&w), "{w} missing\n{text}");
+    }
+
     /// Nominal app on the diagnostics screen with `count` temperature rows.
     fn app_with_sensors(count: usize) -> crate::app::App {
         let mut app = nominal_app();

@@ -108,7 +108,7 @@ pub fn sample_snapshot() -> Snapshot {
             pid,
             name: name.into(),
             user: "testuser".into(),
-            cpu_percent: cpu,
+            cpu_percent: Reading::Available(cpu),
             memory_bytes: memory,
             state: "sleep".into(),
             kernel_thread: false,

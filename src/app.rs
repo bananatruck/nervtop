@@ -264,16 +264,9 @@ impl App {
             (SortKey::Memory, false) => out.sort_by_key(|p| (p.memory_bytes, p.pid)),
             (SortKey::Pid, true) => out.sort_by_key(|p| Reverse(p.pid)),
             (SortKey::Pid, false) => out.sort_by_key(|p| p.pid),
-            (SortKey::Cpu, true) => out.sort_by(|a, b| {
-                b.cpu_percent
-                    .total_cmp(&a.cpu_percent)
-                    .then(a.pid.cmp(&b.pid))
-            }),
-            (SortKey::Cpu, false) => out.sort_by(|a, b| {
-                a.cpu_percent
-                    .total_cmp(&b.cpu_percent)
-                    .then(a.pid.cmp(&b.pid))
-            }),
+            (SortKey::Cpu, descending) => {
+                out.sort_by(|a, b| a.cmp_cpu(b, descending).then(a.pid.cmp(&b.pid)))
+            }
         }
         out
     }
@@ -628,7 +621,7 @@ mod tests {
             pid,
             name: name.into(),
             user: "u".into(),
-            cpu_percent: cpu,
+            cpu_percent: Reading::Available(cpu),
             memory_bytes: mem,
             state: "sleep".into(),
             kernel_thread: kernel,

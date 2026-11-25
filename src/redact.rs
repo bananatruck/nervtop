@@ -217,7 +217,7 @@ mod tests {
                 pid: 10,
                 name: "secret-tool".into(),
                 user: "kesh".into(),
-                cpu_percent: 42.0,
+                cpu_percent: Reading::Available(42.0),
                 ..template.clone()
             },
             ProcessInfo {
@@ -254,7 +254,7 @@ mod tests {
         let p = s.processes.value().unwrap();
         assert_eq!(p[0].name, "app-01");
         assert_eq!(p[0].user, "user");
-        assert_eq!(p[0].cpu_percent, 42.0);
+        assert_eq!(p[0].cpu_percent, Reading::Available(42.0));
         assert_eq!(p[1].name, "systemd");
         assert_eq!(p[1].user, "root");
         assert_eq!(p[2].name, "app-01", "same name, same label");

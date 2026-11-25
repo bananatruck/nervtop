@@ -10,9 +10,9 @@ pub struct Processes {
     users_at: Instant,
     warmed: bool,
     samples: u64,
-    /// (PID, start time) of every process in the previous successful scan:
-    /// those, and only those, have a CPU baseline in this one.
-    measured: std::collections::HashSet<(u32, u64)>,
+    /// (PID, start time) of every process in the previous successful scan,
+    /// with its accumulated CPU time then: see `cpu_reading`.
+    measured: std::collections::HashMap<(u32, u64), u64>,
 }
 impl Default for Processes {
     fn default() -> Self {
@@ -22,7 +22,7 @@ impl Default for Processes {
             users_at: Instant::now(),
             warmed: false,
             samples: 0,
-            measured: std::collections::HashSet::new(),
+            measured: std::collections::HashMap::new(),
         }
     }
 }
@@ -41,7 +41,7 @@ impl Source for Processes {
             self.measured = s
                 .processes()
                 .values()
-                .map(|p| (p.pid().as_u32(), p.start_time()))
+                .map(|p| ((p.pid().as_u32(), p.start_time()), p.accumulated_cpu_time()))
                 .collect();
         }
         if let Err(reason) = scan_outcome(updated, &mut self.warmed) {
@@ -92,13 +92,13 @@ impl Source for Processes {
                             .unwrap_or_else(|| id.to_string())
                     })
                     .unwrap_or_else(|| "unknown".into()),
-                // sysinfo leaves 0 until a process has two scans of CPU
-                // time; that 0 is not a measurement.
-                cpu_percent: if previous.contains(&(p.pid().as_u32(), p.start_time())) {
-                    Reading::Available(p.cpu_usage())
-                } else {
-                    Reading::unavailable("warming up")
-                },
+                // sysinfo leaves a placeholder 0 until it has a baseline with
+                // CPU time; that 0 is not a measurement (see `cpu_reading`).
+                cpu_percent: cpu_reading(
+                    previous.get(&(p.pid().as_u32(), p.start_time())).copied(),
+                    p.accumulated_cpu_time(),
+                    p.cpu_usage(),
+                ),
                 memory_bytes: p.memory(),
                 state: state(p.status()).into(),
                 kernel_thread: p.thread_kind() == Some(ThreadKind::Kernel),
@@ -108,6 +108,20 @@ impl Source for Processes {
         Reading::Available(out)
     }
 }
+/// A process's CPU reading from sysinfo's `usage`, given its accumulated CPU
+/// time in the previous scan (`None` if it was not in it) and in this one.
+/// sysinfo 0.40.4 computes usage only when the previous scan saw CPU time
+/// (compute_cpu_usage in src/unix/linux/process.rs returns early when the
+/// old utime and stime are both 0), so a 0 then is a placeholder unless the
+/// process used no CPU time in between either, which is a measured 0.
+fn cpu_reading(previous: Option<u64>, current: u64, usage: f32) -> Reading<f32> {
+    match previous {
+        Some(0) if current > 0 => Reading::unavailable("warming up"),
+        Some(_) => Reading::Available(usage),
+        None => Reading::unavailable("warming up"),
+    }
+}
+
 /// The command name in `/proc/<pid>/stat`, when that file still describes
 /// the sampled process (the same start time, in seconds since the epoch as
 /// sysinfo computes it). sysinfo keeps the name it read when it first saw a
@@ -244,6 +258,63 @@ mod tests {
         child.kill().unwrap();
         child.wait().unwrap();
         assert_eq!(first.cpu_percent.reason(), Some("warming up"));
+    }
+
+    /// sysinfo 0.40.4 computes CPU usage only when the previous scan saw some
+    /// CPU time (compute_cpu_usage returns early when old utime and stime are
+    /// both 0), so a process idle at its first scan and busy by the next
+    /// would read 0. That reading must not be published as measured.
+    #[test]
+    fn cpu_is_measured_only_after_a_scan_with_cpu_time() {
+        for (previous, current, usage, expected) in [
+            (None, 0, 0.0, Err("warming up")),
+            (None, 50, 0.0, Err("warming up")),
+            (Some(0), 0, 0.0, Ok(0.0)),
+            (Some(0), 30, 0.0, Err("warming up")),
+            (Some(10), 10, 0.0, Ok(0.0)),
+            (Some(10), 40, 12.5, Ok(12.5)),
+        ] {
+            let reading = cpu_reading(previous, current, usage);
+            match expected {
+                Ok(value) => assert_eq!(reading.value(), Some(&value), "{previous:?} {current}"),
+                Err(reason) => assert_eq!(reading.reason(), Some(reason), "{previous:?} {current}"),
+            }
+        }
+    }
+
+    /// A process idle at its first scan that turns busy before the next one.
+    #[test]
+    fn a_process_that_turns_busy_after_an_idle_first_scan_is_not_reported_idle() {
+        use std::io::Write;
+        let mut p = Processes::default();
+        p.sample();
+        p.sample();
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "read line; while :; do :; done"])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        let first = row(&mut p, child.id());
+        child.stdin.as_mut().unwrap().write_all(b"go\n").unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        let second = row(&mut p, child.id());
+        std::thread::sleep(Duration::from_millis(300));
+        let third = row(&mut p, child.id());
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert_eq!(first.cpu_percent.reason(), Some("warming up"));
+        assert_ne!(
+            second.cpu_percent.value(),
+            Some(&0.0),
+            "{:?}",
+            second.cpu_percent
+        );
+        assert!(
+            third.cpu_percent.value().is_some_and(|v| *v > 10.0),
+            "{:?}",
+            third.cpu_percent
+        );
     }
 
     #[test]

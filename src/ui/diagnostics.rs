@@ -111,8 +111,11 @@ fn table_areas(area: Rect, app: &App) -> [Rect; 6] {
     ]
 }
 
-/// Last shared offset that moves at least one rendered diagnostics table.
-pub fn max_offset(area: Rect, app: &App) -> usize {
+/// Navigation bounds of the rendered diagnostics tables, which share one
+/// scroll offset: the last offset that moves at least one table, and a page
+/// step no larger than the smallest data-row capacity among the tables that
+/// scroll, so a page never skips a row of any table.
+pub fn bounds(area: Rect, app: &App) -> (usize, usize) {
     let areas = table_areas(area, app).map(|area| panel_block("", &app.palette).inner(area));
     let mut rows = [0; 6];
     if let Some(snapshot) = &app.snapshot {
@@ -143,12 +146,17 @@ pub fn max_offset(area: Rect, app: &App) -> usize {
         areas[4].height as usize > rows[4],
         areas[5].height >= 4,
     ];
-    rows.into_iter()
-        .zip(areas)
-        .zip(headers)
-        .map(|((rows, area), header)| maximum_offset(rows, area, header))
-        .max()
-        .unwrap_or(0)
+    let mut last = 0;
+    let mut page: Option<usize> = None;
+    for ((rows, area), header) in rows.into_iter().zip(areas).zip(headers) {
+        let max = maximum_offset(rows, area, header);
+        if max > 0 {
+            last = last.max(max);
+            let capacity = area.height.saturating_sub(u16::from(header)) as usize;
+            page = Some(page.map_or(capacity, |p| p.min(capacity)));
+        }
+    }
+    (last, page.unwrap_or(1).max(1))
 }
 
 /// Draws the DIAGNOSTICS screen using `Table` widgets for all subsystems.
@@ -982,6 +990,78 @@ mod tests {
             "capacity column lost: {row:?}"
         );
     }
+    /// Nominal app on the diagnostics screen with `count` temperature rows.
+    fn app_with_sensors(count: usize) -> crate::app::App {
+        let mut app = nominal_app();
+        app.screen = Screen::Diagnostics;
+        let snapshot = app.snapshot.as_mut().unwrap();
+        let Reading::Available(sensors) = &mut snapshot.sensors else {
+            unreachable!()
+        };
+        let template = sensors.temps[0].clone();
+        sensors.temps = (0..count)
+            .map(|i| crate::model::TempSensor {
+                chip: "probe".into(),
+                label: format!("{i:02}"),
+                ..template.clone()
+            })
+            .collect();
+        sensors.fans.clear();
+        app
+    }
+
+    fn key(app: &mut crate::app::App, code: crossterm::event::KeyCode) {
+        use crossterm::event::{KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
+    }
+
+    /// A page moves the shared offset by no more than the smallest table
+    /// that scrolls can show, so no row of any table is skipped; the process
+    /// page size (16 rows at 80x24) is not a diagnostics page.
+    #[test]
+    fn page_keys_move_diagnostics_without_skipping_rows() {
+        use crossterm::event::KeyCode;
+        let mut app = app_with_sensors(40);
+        let shown = buffer_lines(&crate::screenshot::render(&mut app, 80, 24))
+            .iter()
+            .filter(|line| line.contains("probe:"))
+            .count();
+        assert!(shown >= 1);
+        key(&mut app, KeyCode::PageDown);
+        assert!(
+            (1..=shown).contains(&app.diagnostics_offset),
+            "moved {} with {shown} sensor rows shown",
+            app.diagnostics_offset
+        );
+        let after = app.diagnostics_offset;
+        key(&mut app, KeyCode::PageDown);
+        assert_eq!(app.diagnostics_offset, after * 2);
+        key(&mut app, KeyCode::PageUp);
+        assert_eq!(app.diagnostics_offset, after);
+    }
+
+    /// A frame too small to draw any table does not reset the saved
+    /// position; it is clamped again once the tables can be drawn.
+    #[test]
+    fn a_too_small_frame_keeps_the_diagnostics_position() {
+        use crossterm::event::KeyCode;
+        let mut app = app_with_sensors(40);
+        crate::screenshot::render(&mut app, 80, 24);
+        for _ in 0..5 {
+            key(&mut app, KeyCode::Down);
+        }
+        assert_eq!(app.diagnostics_offset, 5);
+        crate::screenshot::render(&mut app, 20, 5);
+        assert_eq!(app.diagnostics_offset, 5);
+        crate::screenshot::render(&mut app, 80, 24);
+        assert_eq!(app.diagnostics_offset, 5);
+        // Once the tables fit, the position is clamped as before.
+        crate::screenshot::render(&mut app, 20, 5);
+        app.apply_snapshot(nominal_app().snapshot.unwrap());
+        crate::screenshot::render(&mut app, 200, 60);
+        assert_eq!(app.diagnostics_offset, 0);
+    }
+
     #[test]
     fn diagnostics_bottom_tracks_resizes_and_shorter_inventories() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};

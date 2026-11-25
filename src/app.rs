@@ -180,6 +180,8 @@ pub struct App {
     /// Shared row offset for diagnostics tables; each table clamps to its final page.
     pub diagnostics_offset: usize,
     diagnostics_max_offset: usize,
+    /// Rows one PgDn or PgUp moves the diagnostics tables.
+    diagnostics_page: usize,
     /// Every rule status from the latest evaluation, in `RuleId::ALL` order.
     pub rules: Vec<RuleStatus>,
     pub consensus: Consensus,
@@ -212,6 +214,7 @@ impl App {
             procs: ProcessView::default(),
             diagnostics_offset: 0,
             diagnostics_max_offset: 0,
+            diagnostics_page: 1,
             rules: Vec::new(),
             consensus: Consensus::unknown(),
             log: VecDeque::new(),
@@ -221,10 +224,16 @@ impl App {
         }
     }
 
-    /// Updates diagnostics navigation to the rendered table capacities.
-    pub fn set_diagnostics_max_offset(&mut self, offset: usize) {
-        self.diagnostics_max_offset = offset;
-        self.diagnostics_offset = self.diagnostics_offset.min(offset);
+    /// Updates diagnostics navigation to the rendered tables: their last
+    /// useful offset and page step, from `ui::diagnostics::bounds`. `None`
+    /// (no table can be drawn) keeps the saved position and bounds.
+    pub fn set_diagnostics_bounds(&mut self, bounds: Option<(usize, usize)>) {
+        let Some((last, page)) = bounds else {
+            return;
+        };
+        self.diagnostics_max_offset = last;
+        self.diagnostics_page = page.max(1);
+        self.diagnostics_offset = self.diagnostics_offset.min(last);
     }
 
     /// Processes after the kernel-thread setting and the name filter, in the
@@ -542,10 +551,10 @@ impl App {
                     K::Char('k') | K::Up => self.diagnostics_offset.saturating_sub(1),
                     K::PageDown => self
                         .diagnostics_offset
-                        .saturating_add(self.page_size.max(1)),
+                        .saturating_add(self.diagnostics_page),
                     K::PageUp => self
                         .diagnostics_offset
-                        .saturating_sub(self.page_size.max(1)),
+                        .saturating_sub(self.diagnostics_page),
                     K::Char('g') => 0,
                     _ => last,
                 }

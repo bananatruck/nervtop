@@ -43,8 +43,8 @@ The selection is kept on the same PID across refreshes when that process still e
 Every temperature sensor and fan, every GPU field, the full battery record, every disk and interface, the alert rule table with current values and thresholds, and the alert event log with timestamps.
 Use `j`, `k`, or the arrow keys to scroll the diagnostics tables together.
 Each shorter table stops at its last page.
-`PgUp` and `PgDn` move by a page, and `g` and `G` go to the first and last rows.
-The scroll position persists across redraws and screen changes.
+`PgUp` and `PgDn` move by a page, the number of data rows the smallest scrolling table shows, so no table skips a row; `g` and `G` go to the first and last rows.
+The scroll position persists across redraws, screen changes, and a terminal that is briefly too small to draw the tables.
 `--once` also lists every reading.
 
 ### Overlays and small terminals

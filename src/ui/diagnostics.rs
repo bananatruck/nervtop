@@ -1050,12 +1050,19 @@ mod tests {
             .unwrap();
         missing.value = None;
         missing.subject = "memprobe".into();
+        // Rows are found by their rule key, which leads the RULE cell and is
+        // never truncated; the subject after it can be ("loadpro…" at 120x40).
         for (width, height) in [(200, 60), (120, 40), (80, 24)] {
             let lines = buffer_lines(&render(&app, width, height));
-            for (subject, value) in [("loadprobe", "0.09/core"), ("memprobe", "unavailable")] {
-                if let Some(row) = lines.iter().find(|l| l.contains(subject)) {
-                    assert!(row.contains(value), "{width}x{height}: {row:?}");
-                }
+            for (key, value) in [("load", "0.09/core"), ("memory", "unavailable")] {
+                let row = lines
+                    .iter()
+                    .find_map(|l| {
+                        l.split('│')
+                            .find(|cell| cell.starts_with(&format!("{key} ")))
+                    })
+                    .unwrap_or_else(|| panic!("{width}x{height}: no {key} rule row"));
+                assert!(row.contains(value), "{width}x{height}: {row:?}");
             }
         }
         // At the widest size both rows are on screen.

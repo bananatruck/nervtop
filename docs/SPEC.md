@@ -60,7 +60,7 @@ Below 80 columns or 24 rows nervtop draws a single centered message that states 
 | `?`, `F1` | Toggle help overlay |
 | `1`, `2`, `3` | Overview, processes, diagnostics |
 | `Tab`, `Shift+Tab` | Next, previous screen |
-| `Space` | Pause or resume sampling (the screen keeps the last sample) |
+| `Space` | Pause or resume sampling (the screen keeps the last sample); on resume every rate warms up again over a fresh window |
 | `+`, `-` | Lengthen or shorten the sample interval within 250 ms to 10 s |
 | `t` | Cycle built-in themes for this session |
 | `s` | Cycle the process sort key: CPU, memory, PID, name |

@@ -15,6 +15,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub trait Source: Send {
     type Output;
     fn sample(&mut self) -> Reading<Self::Output>;
+    /// Forgets every rate baseline, so the next rates cover a fresh window.
+    /// Called when sampling resumes after a pause; an ordinary failed poll
+    /// does not call it and may still reuse the last valid baseline.
+    fn restart(&mut self) {}
 }
 
 /// Host identity and uptime. Each field carries its own availability.
@@ -44,6 +48,25 @@ pub struct Collector {
 impl Collector {
     pub fn new(sources: Sources) -> Collector {
         Collector { sources, seq: 0 }
+    }
+
+    /// Replaces the network source, for tests of the sampling loop.
+    #[cfg(test)]
+    pub fn replace_network(&mut self, network: Box<dyn Source<Output = Vec<NetInterface>>>) {
+        self.sources.network = network;
+    }
+
+    /// Forgets every source's rate baselines; see [`Source::restart`].
+    pub fn restart(&mut self) {
+        let s = &mut self.sources;
+        s.cpu.restart();
+        s.memory.restart();
+        s.disks.restart();
+        s.network.restart();
+        s.processes.restart();
+        s.sensors.restart();
+        s.gpus.restart();
+        s.battery.restart();
     }
 
     /// Takes one sample from every source.

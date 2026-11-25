@@ -48,6 +48,10 @@ fn display_name(name: &OsStr) -> String {
 impl Source for Network {
     type Output = Vec<NetInterface>;
 
+    fn restart(&mut self) {
+        self.rates.clear();
+    }
+
     fn sample(&mut self) -> Reading<Self::Output> {
         let now = Instant::now();
         let mut seen = BTreeSet::new();
@@ -214,6 +218,32 @@ mod tests {
         let eth0 = &sample.value().unwrap()[0];
         assert!(eth0.rx_bps.is_available(), "{:?}", eth0.rx_bps);
         assert!(eth0.tx_bps.is_available(), "{:?}", eth0.tx_bps);
+    }
+
+    /// After a pause, the resume sample may fail to read a counter. The
+    /// first published rate must then warm up again instead of measuring
+    /// from the counter read before the pause.
+    #[test]
+    fn a_failed_read_at_resume_does_not_keep_the_pre_pause_baseline() {
+        let root = tempfile::tempdir().unwrap();
+        write_interface(root.path(), "eth0", 7, 100, 100);
+        let mut network = Network::new(root.path().into());
+        assert!(network.sample().is_available());
+        // Resume: baselines restart, then the unpublished sample reads.
+        network.restart();
+        let rx_path = root.path().join("sys/class/net/eth0/statistics/rx_bytes");
+        fs::write(&rx_path, "unreadable").unwrap();
+        fs::write(
+            root.path().join("sys/class/net/eth0/statistics/tx_bytes"),
+            "900",
+        )
+        .unwrap();
+        assert!(network.sample().is_available());
+        write_interface(root.path(), "eth0", 7, 5000, 1000);
+        let published = network.sample();
+        let eth0 = &published.value().unwrap()[0];
+        assert_eq!(eth0.rx_bps.reason(), Some("warming up"));
+        assert!(eth0.tx_bps.is_available());
     }
 
     #[test]

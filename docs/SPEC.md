@@ -42,6 +42,7 @@ The selection is kept on the same PID across refreshes when that process still e
 
 Every temperature sensor and fan, every GPU field, the full battery record, every disk and interface, the alert rule table with current values and thresholds, and the alert event log with timestamps.
 Each direction of a disk or interface rate is shown on its own, so one unavailable direction does not hide the other.
+When the rate column does not fit with full "unavailable" labels, an unavailable direction shrinks to "-" before the column is dropped, so an unavailable label never pushes an available reading off screen.
 Rule values are never clipped; on a narrow table the thresholds columns are left out first, then the label column.
 Use `j`, `k`, or the arrow keys to scroll the diagnostics tables together.
 Each shorter table stops at its last page.

@@ -597,6 +597,8 @@ fn draw_io_table(frame: &mut Frame, area: Rect, app: &App) {
 
     let show_device = inner.width >= 56;
     let mut raw_rows: Vec<([String; 3], [Style; 3])> = Vec::new();
+    // The rate cell of each row as it reads when it must be narrow: see `directions`.
+    let mut compact_rates: Vec<String> = Vec::new();
 
     match &snap.disks {
         Reading::Unavailable(r) => {
@@ -608,6 +610,7 @@ fn draw_io_table(frame: &mut Frame, area: Rect, app: &App) {
                 ],
                 [muted, unknown, muted],
             ));
+            compact_rates.push(String::new());
         }
         Reading::Available(disks) => {
             for d in disks {
@@ -616,12 +619,27 @@ fn draw_io_table(frame: &mut Frame, area: Rect, app: &App) {
                 } else {
                     d.mount_point.clone()
                 };
-                let (rw_s, rw_st) =
-                    directions(("R", &d.read_bps), ("W", &d.write_bps), text_style, unknown);
+                let (rw_s, rw_st) = directions(
+                    ("R", &d.read_bps),
+                    ("W", &d.write_bps),
+                    text_style,
+                    unknown,
+                    false,
+                );
                 raw_rows.push((
                     [label, fmt::bytes_pair(d.used_bytes(), d.total_bytes), rw_s],
                     [text_style, muted, rw_st],
                 ));
+                compact_rates.push(
+                    directions(
+                        ("R", &d.read_bps),
+                        ("W", &d.write_bps),
+                        text_style,
+                        unknown,
+                        true,
+                    )
+                    .0,
+                );
             }
         }
     }
@@ -636,11 +654,27 @@ fn draw_io_table(frame: &mut Frame, area: Rect, app: &App) {
                 ],
                 [muted, unknown, muted],
             ));
+            compact_rates.push(String::new());
         }
         Reading::Available(ifaces) => {
             for n in sorted_interfaces(ifaces) {
-                let (rx_tx_s, rx_tx_st) =
-                    directions(("RX", &n.rx_bps), ("TX", &n.tx_bps), text_style, unknown);
+                let (rx_tx_s, rx_tx_st) = directions(
+                    ("RX", &n.rx_bps),
+                    ("TX", &n.tx_bps),
+                    text_style,
+                    unknown,
+                    false,
+                );
+                compact_rates.push(
+                    directions(
+                        ("RX", &n.rx_bps),
+                        ("TX", &n.tx_bps),
+                        text_style,
+                        unknown,
+                        true,
+                    )
+                    .0,
+                );
                 raw_rows.push((
                     [
                         n.name.clone(),
@@ -665,7 +699,24 @@ fn draw_io_table(frame: &mut Frame, area: Rect, app: &App) {
     }
 
     let w = inner.width as usize;
-    let include_rates = col_w[0] + col_w[1] + col_w[2] + 2 <= w;
+    let fits = |rate_w: usize| col_w[0] + col_w[1] + rate_w + 2 <= w;
+    let mut include_rates = fits(col_w[2]);
+    // An unavailable direction must not cost an available one its place: before
+    // the rate column is dropped, unavailable directions shrink to "-".
+    if !include_rates {
+        let compact_w = compact_rates
+            .iter()
+            .map(|c| c.chars().count())
+            .max()
+            .unwrap_or(0);
+        if fits(compact_w.max(1)) {
+            for ((cells, _), compact) in raw_rows.iter_mut().zip(&compact_rates) {
+                cells[2].clone_from(compact);
+            }
+            col_w[2] = compact_w.max(1);
+            include_rates = true;
+        }
+    }
 
     if include_rates {
         let rows: Vec<Row<'static>> = raw_rows
@@ -716,18 +767,32 @@ fn draw_io_table(frame: &mut Frame, area: Rect, app: &App) {
 /// The two rates of one device, each shown on its own, so a direction that
 /// is unavailable does not hide the other's reading. Both unavailable show
 /// the first reason, as one reading.
+///
+/// `compact` is the form used when the full one does not fit: an unavailable
+/// direction is "-", as missing values are in the GPU table, and a device with
+/// both directions out is a single "-". "-" is narrower than any rate, so the
+/// compact column fits whenever the column would fit with every direction
+/// available, and an unavailable label can never push an available reading
+/// off screen.
 fn directions(
     first: (&str, &Reading<f64>),
     second: (&str, &Reading<f64>),
     text_style: Style,
     unknown: Style,
+    compact: bool,
 ) -> (String, Style) {
     if let (Reading::Unavailable(reason), Reading::Unavailable(_)) = (first.1, second.1) {
-        return (fmt::unavailable_str(reason, 20), unknown);
+        let text = if compact {
+            "-".to_string()
+        } else {
+            fmt::unavailable_str(reason, 20)
+        };
+        return (text, unknown);
     }
+    let missing = if compact { "-" } else { "unavailable" };
     let part = |(label, reading): (&str, &Reading<f64>)| match reading {
         Reading::Available(v) => format!("{label} {}", fmt::rate(*v)),
-        Reading::Unavailable(_) => format!("{label} unavailable"),
+        Reading::Unavailable(_) => format!("{label} {missing}"),
     };
     (format!("{} {}", part(first), part(second)), text_style)
 }
@@ -1091,6 +1156,102 @@ mod tests {
         let w = format!("R unavailable W {}", crate::ui::fmt::rate(4096.0));
         assert!(text.contains(&rx), "{rx} missing\n{text}");
         assert!(text.contains(&w), "{w} missing\n{text}");
+    }
+
+    /// An available direction is never dropped to make room for an
+    /// unavailable one. A fixture with short names and totals leaves room for
+    /// the rate column at 80x24; every mix of available and unavailable
+    /// directions must keep each available reading on screen there, and wide
+    /// terminals keep the full "unavailable" labels.
+    #[test]
+    fn available_directions_survive_unavailable_neighbours_at_every_size() {
+        use crate::ui::fmt::unavailable_str;
+        let zero = || Reading::Available(0.0);
+        // "absent" makes the both-unavailable label "unavailable (absent)", 20
+        // cells: wider than the 18 left for rates at 80x24 in this fixture.
+        let patterns: [(&str, bool, bool, &str); 5] = [
+            ("both available", true, true, "warming up"),
+            ("first unavailable", false, true, "warming up"),
+            ("second unavailable", true, false, "warming up"),
+            ("both unavailable", false, false, "warming up"),
+            (
+                "both unavailable with a short reason",
+                false,
+                false,
+                "absent",
+            ),
+        ];
+        for (name, first_ok, second_ok, reason) in patterns {
+            let out = || Reading::unavailable(reason);
+            let mut app = nominal_app();
+            app.screen = Screen::Diagnostics;
+            let snapshot = app.snapshot.as_mut().unwrap();
+            let Reading::Available(disks) = &mut snapshot.disks else {
+                unreachable!()
+            };
+            disks.truncate(1);
+            disks[0].mount_point = "/".into();
+            disks[0].total_bytes = 0;
+            disks[0].available_bytes = 0;
+            disks[0].read_bps = if first_ok { zero() } else { out() };
+            disks[0].write_bps = if second_ok { zero() } else { out() };
+            let Reading::Available(nets) = &mut snapshot.network else {
+                unreachable!()
+            };
+            nets.truncate(1);
+            nets[0].name = "qa".into();
+            nets[0].rx_total_bytes = Reading::Available(0);
+            nets[0].tx_total_bytes = Reading::Available(0);
+            nets[0].rx_bps = if first_ok { zero() } else { out() };
+            nets[0].tx_bps = if second_ok { zero() } else { out() };
+            let mut always = nets[0].clone();
+            always.name = "qb".into();
+            always.rx_bps = zero();
+            always.tx_bps = zero();
+            nets.push(always);
+
+            for (width, height) in [(80, 24), (200, 60)] {
+                let lines = buffer_lines(&render(&app, width, height));
+                let cell = |lead: &str| -> String {
+                    lines
+                        .iter()
+                        .find_map(|l| l.split('│').find(|c| c.starts_with(lead)))
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "{name} {width}x{height}: no {lead:?} row\n{}",
+                                lines.join("\n")
+                            )
+                        })
+                        .to_string()
+                };
+                let at = format!("{name} {width}x{height}");
+                // The fully available interface keeps both readings.
+                let qb = cell("qb ");
+                assert!(qb.contains("RX 0 B/s TX 0 B/s"), "{at}: {qb:?}");
+                for (row, (a, b)) in [(cell("qa "), ("RX", "TX")), (cell("/ "), ("R", "W"))] {
+                    for (label, ok) in [(a, first_ok), (b, second_ok)] {
+                        if ok {
+                            let shown = format!("{label} 0 B/s");
+                            assert!(row.contains(&shown), "{at}: {shown} lost: {row:?}");
+                        } else if first_ok || second_ok {
+                            // Full label when it fits, "-" when only the compact form does.
+                            let marker = if width == 200 { "unavailable" } else { "-" };
+                            let shown = format!("{label} {marker}");
+                            assert!(row.contains(&shown), "{at}: {shown} missing: {row:?}");
+                        }
+                    }
+                    if !first_ok && !second_ok {
+                        let full = unavailable_str(reason, 20);
+                        // The full label when it fits beside qb's readings, else "-".
+                        if width == 200 || full.chars().count() <= 18 {
+                            assert!(row.contains(&full), "{at}: {full} missing: {row:?}");
+                        } else {
+                            assert!(row.trim_end().ends_with(" -"), "{at}: no marker: {row:?}");
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Nominal app on the diagnostics screen with `count` temperature rows.

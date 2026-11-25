@@ -103,13 +103,14 @@ pub fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
             accent,
             paused_style,
         );
+        // Lengths are terminal cells: a double-width character takes two.
         let left_len: usize = parts
             .iter()
-            .map(|(s, _)| s.chars().count())
+            .map(|(s, _)| fmt::display_width(s))
             .sum::<usize>()
             .saturating_add(parts.len().saturating_sub(1));
         let total_len = match &clock_str {
-            Some(c) => left_len + 1 + c.chars().count(),
+            Some(c) => left_len + 1 + fmt::display_width(c),
             None => left_len,
         };
         chosen_left = parts;
@@ -125,12 +126,12 @@ pub fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
             spans.push(Span::styled(" ", muted));
             left_len += 1;
         }
-        left_len += text.chars().count();
+        left_len += fmt::display_width(&text);
         spans.push(Span::styled(text, style));
     }
 
     if let Some(clock) = clock_str {
-        let clock_len = clock.chars().count();
+        let clock_len = fmt::display_width(&clock);
         let pad = width.saturating_sub(left_len + clock_len).max(1);
         spans.push(Span::styled(" ".repeat(pad), muted));
         spans.push(Span::styled(clock, base_style));
@@ -259,32 +260,42 @@ pub fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
-    let pairs: &[(&str, &str)] = if area.width < 100 {
-        &[
-            ("1-3/Tab", "scr "),
-            ("s/r", "sort "),
-            ("/", "flt "),
-            ("j/k", "sel "),
-            ("Spc", "pause "),
-            ("+/-", "rate "),
-            ("t", "thm "),
-            ("a", "ack "),
-            ("?", "help "),
-            ("q", "quit"),
-        ]
+    const COMPACT: &[(&str, &str)] = &[
+        ("1-3/Tab", "scr "),
+        ("s/r", "sort "),
+        ("/", "flt "),
+        ("j/k", "sel "),
+        ("Spc", "pause "),
+        ("+/-", "rate "),
+        ("t", "thm "),
+        ("a", "ack "),
+        ("?", "help "),
+        ("q", "quit"),
+    ];
+    const EXPANDED: &[(&str, &str)] = &[
+        ("1/2/3/Tab", "screen  "),
+        ("s/r", "sort/rev  "),
+        ("/", "filter  "),
+        ("j/k", "move  "),
+        ("Space", "pause  "),
+        ("+/-", "interval  "),
+        ("t", "theme  "),
+        ("a", "ack  "),
+        ("?/F1", "help  "),
+        ("q", "quit"),
+    ];
+    // The expanded hints only when every cell of them fits; a Paragraph
+    // does not wrap, so a wider line would clip the last hints.
+    let cells = |pairs: &[(&str, &str)]| {
+        1 + pairs
+            .iter()
+            .map(|(k, desc)| fmt::display_width(k) + 1 + fmt::display_width(desc))
+            .sum::<usize>()
+    };
+    let pairs = if cells(EXPANDED) <= usize::from(area.width) {
+        EXPANDED
     } else {
-        &[
-            ("1/2/3/Tab", "screen  "),
-            ("s/r", "sort/rev  "),
-            ("/", "filter  "),
-            ("j/k", "move  "),
-            ("Space", "pause  "),
-            ("+/-", "interval  "),
-            ("t", "theme  "),
-            ("a", "ack  "),
-            ("?/F1", "help  "),
-            ("q", "quit"),
-        ]
+        COMPACT
     };
 
     let mut spans = Vec::with_capacity(pairs.len() * 2 + 1);
@@ -295,4 +306,35 @@ pub fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
     }
 
     frame.render_widget(Paragraph::new(Line::from(spans)).style(base_style), area);
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::ui::testkit::{buffer_lines, nominal_app, render};
+
+    /// Double-width characters take two cells; the header budgets cells,
+    /// so a wide hostname cannot push the clock off the line.
+    #[test]
+    fn a_wide_hostname_keeps_the_clock_visible() {
+        let mut app = nominal_app();
+        let snapshot = app.snapshot.as_mut().unwrap();
+        snapshot.host.hostname = crate::model::Reading::Available("\u{6f22}".repeat(20));
+        let taken = snapshot.taken_at_ms;
+        app.utc_offset_secs = Some(0);
+        let clock = crate::clock::hms(taken, 0);
+        let top = buffer_lines(&render(&app, 80, 24))[0].clone();
+        assert!(top.trim_end().ends_with(&clock), "{top:?}");
+    }
+
+    /// The footer shows its complete last hint at every width: the expanded
+    /// hints only where they fit, the compact ones below that.
+    #[test]
+    fn the_footer_hints_are_never_clipped() {
+        let app = nominal_app();
+        for width in 80..=140 {
+            let lines = buffer_lines(&render(&app, width, 30));
+            let footer = lines.last().unwrap().trim_end();
+            assert!(footer.ends_with("q quit"), "{width}: {footer:?}");
+        }
+    }
 }

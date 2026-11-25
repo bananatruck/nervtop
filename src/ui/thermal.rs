@@ -78,10 +78,18 @@ pub fn draw_thermal(frame: &mut Frame, area: Rect, app: &App) {
             t.label.clone()
         };
 
+        // The temperature keeps its cells; the label gets what is left,
+        // shortened if needed, and is padded to 14 cells when there is room.
+        let temp = format!("{:5.1}°C", t.celsius);
+        let room = usize::from(inner.width).saturating_sub(super::fmt::display_width(&temp) + 1);
+        let name = super::fmt::fit_width(&name, room);
+        let pad = 14
+            .min(room)
+            .saturating_sub(super::fmt::display_width(&name));
         let mut spans = vec![
-            Span::styled(format!("{name:<14} "), text_style),
+            Span::styled(format!("{name}{} ", " ".repeat(pad)), text_style),
             Span::styled(
-                format!("{:5.1}°C", t.celsius),
+                temp,
                 Style::default().fg(val_color).add_modifier(Modifier::BOLD),
             ),
         ];
@@ -130,4 +138,26 @@ pub fn draw_thermal(frame: &mut Frame, area: Rect, app: &App) {
     }
 
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::model::Reading;
+    use crate::ui::testkit::{buffer_text, nominal_app, render};
+
+    /// The temperature keeps its cells; a long label is shortened instead.
+    #[test]
+    fn a_long_sensor_label_never_hides_the_temperature() {
+        for (width, height) in [(80, 24), (120, 40)] {
+            let mut app = nominal_app();
+            let snapshot = app.snapshot.as_mut().unwrap();
+            let Reading::Available(sensors) = &mut snapshot.sensors else {
+                unreachable!()
+            };
+            sensors.temps[0].label = "VeryLongVendorSpecificSensorLabel-Package".into();
+            sensors.temps[0].celsius = 99.7;
+            let text = buffer_text(&render(&app, width, height));
+            assert!(text.contains("99.7°C"), "{width}x{height}\n{text}");
+        }
+    }
 }
